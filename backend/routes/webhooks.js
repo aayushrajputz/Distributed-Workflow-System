@@ -17,7 +17,7 @@ router.post('/github', async (req, res) => {
 
     // Verify webhook signature
     const expectedSignature = `sha256=${crypto
-      .createHmac('sha256', process.env.GITHUB_WEBHOOK_SECRET)
+      .createHmac('sha256', process.env.WEBHOOK_SECRET)
       .update(JSON.stringify(payload))
       .digest('hex')}`;
 

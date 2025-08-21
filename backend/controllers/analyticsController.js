@@ -2,7 +2,7 @@ const UsageLog = require('../models/UsageLog');
 const ApiKey = require('../models/ApiKey');
 
 // @desc    Get user's API usage statistics
-// @route   GET /api/analytics/usage
+// @route   GET /api/analytics/usagep
 // @access  Private
 const getUsageStats = async (req, res) => {
   try {
