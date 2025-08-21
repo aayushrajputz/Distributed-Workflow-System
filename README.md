@@ -20,6 +20,8 @@ A comprehensive workflow management system enhanced with a complete SaaS API pla
 
 ## 🏗️ **Architecture**
 
+![Flowchart](./A_flowchart_diagram_depicts_a_distributed_workflow.png)
+
 ```
 Workflow Management System
 ├── Backend (Node.js + Express + MongoDB)
