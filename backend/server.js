@@ -58,7 +58,7 @@ const server = http.createServer(app);
 // Initialize Socket.io with security
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:3000',
+    origin: process.env.CLIENT_URL || 'distributed-workflow-system.vercel.app',
     methods: ['GET', 'POST'],
     credentials: true,
   },
