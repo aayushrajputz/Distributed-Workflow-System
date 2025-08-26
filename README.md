@@ -2,6 +2,10 @@
 
 A comprehensive workflow management system enhanced with a complete SaaS API platform for exposing functionality through secure, managed APIs.
 
+
+![Architecture Diagram](public/archticture-diagram.png)
+
+
 ## ✨ **Integrated Features**
 
 ### **Core Workflow Management**
@@ -19,7 +23,7 @@ A comprehensive workflow management system enhanced with a complete SaaS API pla
 - ✅ **Security Best Practices** - API key hashing, input validation, CORS
 
 ## 🏗️ **Architecture**
-
+ 
 ```
 Workflow Management System
 ├── Backend (Node.js + Express + MongoDB)
@@ -50,6 +54,7 @@ cp .env.example .env
 # Start the server
 npm run dev
 ```
+
 
 ### **2. Frontend Setup**
 ```bash
