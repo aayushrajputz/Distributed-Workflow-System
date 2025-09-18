@@ -2,6 +2,16 @@ const axios = require('axios');
 const crypto = require('node:crypto');
 const Integration = require('../models/Integration');
 const AuditLog = require('../models/AuditLog');
+const { requestWithTimeout } = require('../utils/requestUtils');
+const logger = require('../utils/logger');
+
+// Service timeouts
+const TIMEOUTS = {
+  slack: 5000,    // 5 seconds
+  jira: 15000,    // 15 seconds
+  github: 8000,   // 8 seconds
+  webhook: 12000  // 12 seconds
+};
 
 class IntegrationService {
   constructor() {
@@ -70,7 +80,12 @@ class IntegrationService {
           attachments: options.attachments || [],
         };
 
-        const response = await axios.post(config.webhookUrl, payload);
+        const response = await requestWithTimeout({
+          url: config.webhookUrl,
+          method: 'POST',
+          data: payload,
+        }, TIMEOUTS.slack, 'slack');
+        
         result = { success: true, messageId: response.data };
       }
       // Use bot token if available
@@ -85,12 +100,15 @@ class IntegrationService {
           attachments: options.attachments || [],
         };
 
-        const response = await axios.post('https://slack.com/api/chat.postMessage', payload, {
+        const response = await requestWithTimeout({
+          url: 'https://slack.com/api/chat.postMessage',
+          method: 'POST',
+          data: payload,
           headers: {
             Authorization: `Bearer ${decryptedToken}`,
             'Content-Type': 'application/json',
           },
-        });
+        }, TIMEOUTS.slack, 'slack');
 
         if (response.data.ok) {
           result = { success: true, messageId: response.data.ts };
@@ -285,16 +303,15 @@ class IntegrationService {
         },
       };
 
-      const response = await axios.post(
-        `https://${config.domain}/rest/api/3/issue`,
-        jiraIssue,
-        {
-          headers: {
-            Authorization: `Basic ${auth}`,
-            'Content-Type': 'application/json',
-          },
+      const response = await requestWithTimeout({
+        url: `https://${config.domain}/rest/api/3/issue`,
+        method: 'POST',
+        data: jiraIssue,
+        headers: {
+          Authorization: `Basic ${auth}`,
+          'Content-Type': 'application/json',
         },
-      );
+      }, TIMEOUTS.jira, 'jira');
 
       // Update integration usage
       integration.usage.totalCalls += 1;
@@ -477,18 +494,28 @@ class IntegrationService {
   async testSlackConnection(integration) {
     try {
       if (integration.config.webhookUrl) {
-        await axios.post(integration.config.webhookUrl, {
-          text: '✅ Slack integration test successful!',
-          username: 'Workflow Builder Test',
-          icon_emoji: ':white_check_mark:',
-        });
+        await requestWithTimeout({
+          url: integration.config.webhookUrl,
+          method: 'POST',
+          data: {
+            text: '✅ Slack integration test successful!',
+            username: 'Workflow Builder Test',
+            icon_emoji: ':white_check_mark:',
+          }
+        }, TIMEOUTS.slack, 'slack');
+        
         return { success: true, message: 'Slack webhook test successful' };
-      } if (integration.config.botToken) {
-        const response = await axios.get('https://slack.com/api/auth.test', {
+      } 
+      
+      if (integration.config.botToken) {
+        const response = await requestWithTimeout({
+          url: 'https://slack.com/api/auth.test',
+          method: 'GET',
           headers: {
             Authorization: `Bearer ${this.decrypt(integration.config.botToken)}`,
-          },
-        });
+            'Content-Type': 'application/json'
+          }
+        }, TIMEOUTS.slack, 'slack');
 
         if (response.data.ok) {
           return { success: true, message: 'Slack bot token test successful' };
@@ -505,11 +532,14 @@ class IntegrationService {
   // Test GitHub connection
   async testGitHubConnection(integration) {
     try {
-      const response = await axios.get('https://api.github.com/user', {
+      const response = await requestWithTimeout({
+        url: 'https://api.github.com/user',
+        method: 'GET',
         headers: {
           Authorization: `token ${this.decrypt(integration.config.accessToken)}`,
-        },
-      });
+          'Accept': 'application/vnd.github.v3+json'
+        }
+      }, TIMEOUTS.github, 'github');
 
       if (response.status === 200) {
         return {
@@ -531,14 +561,14 @@ class IntegrationService {
         `${integration.config.email}:${this.decrypt(integration.config.apiToken)}`,
       ).toString('base64');
 
-      const response = await axios.get(
-        `https://${integration.config.domain}/rest/api/3/myself`,
-        {
-          headers: {
-            Authorization: `Basic ${auth}`,
-          },
-        },
-      );
+      const response = await requestWithTimeout({
+        url: `https://${integration.config.domain}/rest/api/3/myself`,
+        method: 'GET',
+        headers: {
+          Authorization: `Basic ${auth}`,
+          'Content-Type': 'application/json'
+        }
+      }, TIMEOUTS.jira, 'jira');
 
       if (response.status === 200) {
         return {
@@ -588,11 +618,16 @@ class IntegrationService {
       `${integration.config.email}:${this.decrypt(integration.config.apiToken)}`,
     ).toString('base64');
 
-    const response = await axios.post(
-      `https://${integration.config.domain}/rest/api/3/issue/${issueKey}/comment`,
-      { body: comment },
-      { headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' } },
-    );
+    const response = await requestWithTimeout({
+      url: `https://${integration.config.domain}/rest/api/3/issue/${issueKey}/comment`,
+      method: 'POST',
+      data: { body: comment },
+      headers: { 
+        Authorization: `Basic ${auth}`, 
+        'Content-Type': 'application/json' 
+      }
+    }, TIMEOUTS.jira, 'jira');
+    
     return { success: response.status === 201 };
   }
 }

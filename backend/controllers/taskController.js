@@ -1,11 +1,29 @@
+const { ObjectId } = require('mongoose').Types;
 const Task = require('../models/Task');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const { queues } = require('../services/backgroundWorker');
 const asyncHandler = require('../utils/asyncHandler');
 const workflowEngine = require('../services/workflowEngine');
 const notificationService = require('../services/notificationService');
 const Integration = require('../models/Integration');
 const integrationService = require('../services/integrationService');
+const validator = require('validator');
+const {
+  VALIDATION_CONSTANTS,
+  sanitizeRegexInput,
+  validatePaginationParams,
+  validateStringLength,
+  validateCharacters,
+  validateSortParameter,
+  escapeRegex,
+  parsePositiveInt,
+  parseSort,
+  isValidObjectId,
+  sanitizeString,
+  sanitizeTags,
+  stripTags
+} = require('../middleware/validation');
 
 // @desc    Get all tasks for authenticated user
 // @route   GET /api/tasks
@@ -15,46 +33,125 @@ const getTasks = asyncHandler(async (req, res) => {
     status, priority, project, page = 1, limit = 10, sort = '-createdAt', assignedTo,
   } = req.query;
 
-  // Build filter object based on user role
-  const filter = { isActive: true };
+  // Build match stage based on user role
+  let matchStage = { isActive: true };
 
   // Role-based filtering
   if (req.user.canViewAllTasks()) {
     // Admins and managers can see all tasks or filter by assignedTo
     if (assignedTo) {
-      filter.assignedTo = assignedTo;
+      if (!validator.isMongoId(assignedTo)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid assignedTo value',
+        });
+      }
+      matchStage.assignedTo = assignedTo;
     }
   } else {
     // Regular users can only see their own tasks
-    filter.assignedTo = req.user._id;
+    matchStage.assignedTo = req.user._id;
   }
 
-  if (status) filter.status = status;
-  if (priority) filter.priority = priority;
-  if (project) filter.project = new RegExp(project, 'i');
+  // Apply validated filters
+  if (status) {
+    const validStatuses = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid status value',
+      });
+    }
+    matchStage.status = status;
+  }
 
-  // Calculate pagination
-  const skip = (page - 1) * limit;
+  if (priority) {
+    const validPriorities = ['low', 'medium', 'high', 'critical'];
+    if (!validPriorities.includes(priority)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid priority value',
+      });
+    }
+    matchStage.priority = priority;
+  }
 
-  // Get tasks with pagination
-  const tasks = await Task.find(filter)
-    .populate('assignedBy', 'firstName lastName email')
-    .populate('assignedTo', 'firstName lastName email')
-    .sort(sort)
-    .skip(skip)
-    .limit(parseInt(limit));
+  if (project) {
+    // Safely escape the project search pattern to prevent ReDoS
+    const sanitizedProject = sanitizeRegexInput(project);
+    matchStage.project = { $regex: sanitizedProject, $options: 'i' };
+  }
 
-  // Get total count for pagination
-  const total = await Task.countDocuments(filter);
+  // Validate and sanitize pagination parameters
+  const { page: validatedPage, limit: validatedLimit } = validatePaginationParams(page, limit);
+  const skip = (validatedPage - 1) * validatedLimit;
+
+  // Validate and sanitize sort parameter
+  const validatedSort = validateSortParameter(sort);
+  const sortObj = {};
+  const sortFields = validatedSort.split(' ');
+  sortFields.forEach(field => {
+    const direction = field.startsWith('-') ? -1 : 1;
+    const fieldName = field.replace(/^-/, '');
+    sortObj[fieldName] = direction;
+  });
+
+  // Build aggregation pipeline
+  const pipeline = [
+    { $match: matchStage },
+    {
+      $facet: {
+        metadata: [
+          { $count: 'total' }
+        ],
+        tasks: [
+          { $sort: sortObj },
+          { $skip: skip },
+          { $limit: validatedLimit },
+          // Join with assignedBy user data
+          {
+            $lookup: {
+              from: 'users',
+              let: { assignedById: '$assignedBy' },
+              pipeline: [
+                { $match: { $expr: { $eq: ['$_id', '$$assignedById'] } } },
+                { $project: { firstName: 1, lastName: 1, email: 1 } }
+              ],
+              as: 'assignedBy'
+            }
+          },
+          { $unwind: '$assignedBy' },
+          // Join with assignedTo user data
+          {
+            $lookup: {
+              from: 'users',
+              let: { assignedToId: '$assignedTo' },
+              pipeline: [
+                { $match: { $expr: { $eq: ['$_id', '$$assignedToId'] } } },
+                { $project: { firstName: 1, lastName: 1, email: 1 } }
+              ],
+              as: 'assignedTo'
+            }
+          },
+          { $unwind: '$assignedTo' }
+        ]
+      }
+    }
+  ];
+
+  // Execute aggregation
+  const [result] = await Task.aggregate(pipeline);
+
+  const total = result.metadata[0]?.total || 0;
 
   res.json({
     success: true,
-    data: tasks,
+    data: result.tasks,
     pagination: {
-      page: parseInt(page),
-      limit: parseInt(limit),
+      page: parseInt(validatedPage),
+      limit: parseInt(validatedLimit),
       total,
-      pages: Math.ceil(total / limit),
+      pages: Math.ceil(total / validatedLimit),
     },
   });
 });
@@ -63,10 +160,89 @@ const getTasks = asyncHandler(async (req, res) => {
 // @route   GET /api/tasks/:id
 // @access  Private
 const getTask = asyncHandler(async (req, res) => {
-  const task = await Task.findById(req.params.id)
-    .populate('assignedBy', 'firstName lastName email')
-    .populate('assignedTo', 'firstName lastName email')
-    .populate('comments.user', 'firstName lastName email');
+  // Build aggregation pipeline for single task
+  const pipeline = [
+    {
+      $match: {
+        _id: ObjectId(req.params.id),
+        isActive: true
+      }
+    },
+    // Join with assignedBy user data
+    {
+      $lookup: {
+        from: 'users',
+        let: { assignedById: '$assignedBy' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$_id', '$$assignedById'] } } },
+          { $project: { firstName: 1, lastName: 1, email: 1 } }
+        ],
+        as: 'assignedBy'
+      }
+    },
+    { $unwind: '$assignedBy' },
+    // Join with assignedTo user data
+    {
+      $lookup: {
+        from: 'users',
+        let: { assignedToId: '$assignedTo' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$_id', '$$assignedToId'] } } },
+          { $project: { firstName: 1, lastName: 1, email: 1 } }
+        ],
+        as: 'assignedTo'
+      }
+    },
+    { $unwind: '$assignedTo' },
+    // Join with comment users data
+    {
+      $lookup: {
+        from: 'users',
+        let: { commentUserIds: '$comments.user' },
+        pipeline: [
+          { $match: { $expr: { $in: ['$_id', '$$commentUserIds'] } } },
+          { $project: { firstName: 1, lastName: 1, email: 1 } }
+        ],
+        as: 'commentUsers'
+      }
+    },
+    // Map comments array to include user details
+    {
+      $addFields: {
+        comments: {
+          $map: {
+            input: '$comments',
+            as: 'comment',
+            in: {
+              _id: '$$comment._id',
+              text: '$$comment.text',
+              createdAt: '$$comment.createdAt',
+              user: {
+                $arrayElemAt: [
+                  {
+                    $filter: {
+                      input: '$commentUsers',
+                      as: 'user',
+                      cond: { $eq: ['$$user._id', '$$comment.user'] }
+                    }
+                  },
+                  0
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    // Remove temporary commentUsers array
+    {
+      $project: {
+        commentUsers: 0
+      }
+    }
+  ];
+
+  const [task] = await Task.aggregate(pipeline);
 
   if (!task) {
     return res.status(404).json({
@@ -106,30 +282,96 @@ const createTask = asyncHandler(async (req, res) => {
     estimatedHours,
   } = req.body;
 
-  // Validate required fields
-  if (!title || !description || !project || !dueDate || !scheduledDate) {
+  // Declare date variables in outer scope
+  let due, scheduled;
+
+  // Validate and sanitize required fields
+  try {
+    if (!title || !description || !project || !dueDate || !scheduledDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide title, description, project, due date, and scheduled date',
+      });
+    }
+
+    // Validate title
+    validateStringLength(title, 'Title', VALIDATION_CONSTANTS.TASK.TITLE);
+    validateCharacters(title, 'Title', VALIDATION_CONSTANTS.TASK.TITLE.PATTERN);
+
+    // Validate description
+    validateStringLength(description, 'Description', VALIDATION_CONSTANTS.TASK.DESCRIPTION);
+    validateCharacters(description, 'Description', VALIDATION_CONSTANTS.TASK.DESCRIPTION.PATTERN);
+
+    // Validate project
+    validateStringLength(project, 'Project', VALIDATION_CONSTANTS.TASK.PROJECT);
+    validateCharacters(project, 'Project', VALIDATION_CONSTANTS.TASK.PROJECT.PATTERN);
+
+    // Validate dates
+    if (!validator.isISO8601(dueDate) || !validator.isISO8601(scheduledDate)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid date format. Please use ISO 8601 format.',
+      });
+    }
+
+    // Assign to outer scope variables after validation
+    due = new Date(dueDate);
+    scheduled = new Date(scheduledDate);
+    const now = new Date();
+
+    if (due < now) {
+      return res.status(400).json({
+        success: false,
+        message: 'Due date cannot be in the past',
+      });
+    }
+
+    if (scheduled > due) {
+      return res.status(400).json({
+        success: false,
+        message: 'Scheduled date cannot be after due date',
+      });
+    }
+
+    // Validate tags if provided
+    if (tags && tags.length > 0) {
+      if (!Array.isArray(tags)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Tags must be an array',
+        });
+      }
+
+      if (tags.length > 10) {
+        return res.status(400).json({
+          success: false,
+          message: 'Maximum 10 tags allowed',
+        });
+      }
+
+      // Sanitize each tag
+      tags.forEach((tag, index) => {
+        if (typeof tag !== 'string' || tag.length === 0 || tag.length > 20) {
+          throw new Error(`Invalid tag at position ${index}: must be a string between 1-20 characters`);
+        }
+        tags[index] = validator.escape(tag.trim());
+      });
+    }
+
+    // Validate estimated hours if provided
+    if (estimatedHours !== undefined) {
+      const hours = parseFloat(estimatedHours);
+      if (isNaN(hours) || hours <= 0 || hours > 1000) {
+        return res.status(400).json({
+          success: false,
+          message: 'Estimated hours must be a positive number less than 1000',
+        });
+      }
+    }
+  } catch (error) {
     return res.status(400).json({
       success: false,
-      message: 'Please provide title, description, project, due date, and scheduled date',
-    });
-  }
-
-  // Validate dates
-  const due = new Date(dueDate);
-  const scheduled = new Date(scheduledDate);
-  const now = new Date();
-
-  if (due < now) {
-    return res.status(400).json({
-      success: false,
-      message: 'Due date cannot be in the past',
-    });
-  }
-
-  if (scheduled > due) {
-    return res.status(400).json({
-      success: false,
-      message: 'Scheduled date cannot be after due date',
+      message: error.message,
     });
   }
 
@@ -199,36 +441,43 @@ const createTask = asyncHandler(async (req, res) => {
     console.error('Failed to send task assignment notification:', err.message);
   }
 
-  // Slack: send real-time notification if Slack integration exists
-  try {
-    const slackIntegration = await Integration.findOne({ userId: req.user._id, type: 'slack', isActive: true });
-    if (slackIntegration) {
-      const msg = `🆕 Task created: ${title} (Project: ${project}, Priority: ${priority})\nAssigned to: ${assignedUser.firstName} ${assignedUser.lastName}`;
-      await integrationService.sendSlackNotification(slackIntegration._id, msg, { username: 'Tasks Bot', icon: ':memo:' });
-    }
-  } catch (err) {
-    // best-effort; do not block task creation
-    console.error('Slack notify on create failed:', err.message);
+  // Queue Slack notification if integration exists
+  const slackIntegration = await Integration.findOne({ userId: req.user._id, type: 'slack', isActive: true });
+  if (slackIntegration) {
+    const msg = `🆕 Task created: ${title} (Project: ${project}, Priority: ${priority})\nAssigned to: ${assignedUser.firstName} ${assignedUser.lastName}`;
+    await queues['slack-notifications'].add('task-created', {
+      webhookUrl: slackIntegration.webhookUrl,
+      message: {
+        text: msg,
+        username: 'Tasks Bot',
+        icon_emoji: ':memo:'
+      }
+    }, {
+      priority: priority === 'critical' ? 1 : 2,
+      attempts: 3
+    });
   }
 
-  // Jira: create a linked issue if Jira integration exists
-  try {
-    const jiraIntegration = await Integration.findOne({ userId: req.user._id, type: 'jira', isActive: true });
-    if (jiraIntegration) {
-      const issue = await integrationService.createJiraIssue(jiraIntegration._id, {
-        summary: title,
-        description,
-        issueType: 'Task',
-        priority: priority === 'critical' ? 'Highest' : (priority.charAt(0).toUpperCase() + priority.slice(1)),
-      });
-      if (issue?.issueKey) {
-        task.external = task.external || {};
-        task.external.jira = { issueKey: issue.issueKey, issueUrl: issue.url };
-        await task.save();
-      }
-    }
-  } catch (err) {
-    console.error('Jira sync on create failed:', err.message);
+  // Queue Jira issue creation if integration exists
+  const jiraIntegration = await Integration.findOne({ userId: req.user._id, type: 'jira', isActive: true });
+  if (jiraIntegration) {
+    await queues['jira-operations'].add('create-issue', {
+      operation: 'create',
+      data: {
+        url: jiraIntegration.apiUrl,
+        payload: {
+          summary: title,
+          description,
+          issueType: 'Task',
+          priority: priority === 'critical' ? 'Highest' : (priority.charAt(0).toUpperCase() + priority.slice(1))
+        }
+      },
+      auth: jiraIntegration.auth,
+      taskId: task._id
+    }, {
+      priority: priority === 'critical' ? 1 : 2,
+      attempts: 5
+    });
   }
 
   res.status(201).json({
@@ -274,16 +523,42 @@ const updateTask = asyncHandler(async (req, res) => {
   // Track changes for notifications
   const previousAssignedTo = task.assignedTo?.toString();
 
-  // Update task
-  task = await Task.findByIdAndUpdate(
-    req.params.id,
-    req.body,
-    {
-      new: true,
-      runValidators: true,
+  // Update task and get populated result in one shot
+  const [updatedTask] = await Task.aggregate([
+    { $match: { _id: ObjectId(req.params.id) } },
+    { 
+      $set: {
+        ...req.body,
+        updatedAt: new Date()
+      }
     },
-  ).populate('assignedBy', 'firstName lastName email')
-    .populate('assignedTo', 'firstName lastName email');
+    {
+      $lookup: {
+        from: 'users',
+        let: { assignedById: '$assignedBy' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$_id', '$$assignedById'] } } },
+          { $project: { firstName: 1, lastName: 1, email: 1 } }
+        ],
+        as: 'assignedBy'
+      }
+    },
+    { $unwind: '$assignedBy' },
+    {
+      $lookup: {
+        from: 'users',
+        let: { assignedToId: '$assignedTo' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$_id', '$$assignedToId'] } } },
+          { $project: { firstName: 1, lastName: 1, email: 1 } }
+        ],
+        as: 'assignedTo'
+      }
+    },
+    { $unwind: '$assignedTo' }
+  ]);
+
+  task = updatedTask;
 
   // Send notifications for reassignment/updates
   try {
@@ -392,35 +667,49 @@ const updateTaskStatus = asyncHandler(async (req, res) => {
   await task.populate('assignedBy', 'firstName lastName email');
   await task.populate('assignedTo', 'firstName lastName email');
 
-  // When completed, send Slack notification and optionally create Jira issue link
-  try {
-    if (status === 'completed') {
-      const slackIntegration = await Integration.findOne({ userId: req.user._id, type: 'slack', isActive: true });
-      if (slackIntegration) {
-        const msg = `✅ Task completed: ${task.title} (Project: ${task.project}) by ${req.user.firstName} ${req.user.lastName}`;
-        await integrationService.sendSlackNotification(slackIntegration._id, msg, { username: 'Tasks Bot', icon: ':white_check_mark:' });
-      }
-
-      // Jira: add completion comment to linked issue if available
-      if (task.external?.jira?.issueKey && integrationService.addJiraComment) {
-        try {
-          const jiraIntegration = await Integration.findOne({ userId: req.user._id, type: 'jira', isActive: true });
-          if (jiraIntegration) {
-            await integrationService.addJiraComment(jiraIntegration._id, task.external.jira.issueKey, `Task marked as completed in Workflow Manager at ${new Date().toISOString()}`);
-          }
-        } catch (e) {
-          console.error('Jira comment on complete failed:', e.message);
+  // Queue notifications when task is completed
+  if (status === 'completed') {
+    // Queue Slack notification if integration exists
+    const slackIntegration = await Integration.findOne({ userId: req.user._id, type: 'slack', isActive: true });
+    if (slackIntegration) {
+      const msg = `✅ Task completed: ${task.title} (Project: ${task.project}) by ${req.user.firstName} ${req.user.lastName}`;
+      await queues['slack-notifications'].add('task-completed', {
+        webhookUrl: slackIntegration.webhookUrl,
+        message: {
+          text: msg,
+          username: 'Tasks Bot',
+          icon_emoji: ':white_check_mark:'
         }
+      }, {
+        priority: task.priority === 'critical' ? 1 : 2,
+        attempts: 3
+      });
+    }
+
+    // Queue Jira comment if integration exists
+    if (task.external?.jira?.issueKey) {
+      const jiraIntegration = await Integration.findOne({ userId: req.user._id, type: 'jira', isActive: true });
+      if (jiraIntegration) {
+        await queues['jira-operations'].add('add-comment', {
+          operation: 'comment',
+          data: {
+            url: jiraIntegration.apiUrl,
+            issueKey: task.external.jira.issueKey,
+            payload: {
+              body: `Task marked as completed in Workflow Manager at ${new Date().toISOString()}`
+            }
+          },
+          auth: jiraIntegration.auth
+        }, {
+          priority: task.priority === 'critical' ? 1 : 2,
+          attempts: 5
+        });
       }
     }
-  } catch (err) {
-    console.error('Slack notify on status failed:', err.message);
-  }
 
-  // Send real notification on status changes of interest
-  try {
-    if (status === 'completed') {
-      await notificationService.sendNotification({
+    // Queue task completion notification
+    await queues['notification-batches'].add('task-status-change', {
+      notifications: [{
         recipient: task.assignedBy,
         sender: req.user._id,
         type: 'task_completed',
@@ -431,17 +720,14 @@ const updateTaskStatus = asyncHandler(async (req, res) => {
           taskId: task._id,
           projectName: task.project,
           priority: task.priority,
-          dueDate: task.dueDate,
-        },
-        channels: {
-          inApp: { sent: false, read: false },
-          email: { sent: false },
-          websocket: { sent: false },
-        },
-      });
-    }
-  } catch (err) {
-    console.error('Failed to send task status notification:', err.message);
+          dueDate: task.dueDate
+        }
+      }]
+    }, {
+      priority: task.priority === 'critical' ? 1 : 2,
+      attempts: 3,
+      delay: task.priority === 'critical' ? 0 : 5000 // 5s delay for non-critical tasks
+    });
   }
 
   res.json({
@@ -476,30 +762,59 @@ const deleteTask = asyncHandler(async (req, res) => {
   task.isActive = false;
   await task.save();
 
-  // Notify assignee and creator about deletion
-  try {
-    const populatedTask = await Task.findById(task._id)
-      .populate('assignedBy', 'firstName lastName email')
-      .populate('assignedTo', 'firstName lastName email');
-
-    const recipients = [];
-    if (populatedTask.assignedTo) recipients.push(populatedTask.assignedTo._id);
-    if (populatedTask.assignedBy && populatedTask.assignedBy._id.toString() !== (populatedTask.assignedTo?._id?.toString() || '')) {
-      recipients.push(populatedTask.assignedBy._id);
+  // Queue deletion notifications using aggregation for efficiency
+  const [populatedTask] = await Task.aggregate([
+    {
+      $match: { _id: task._id }
+    },
+    {
+      $lookup: {
+        from: 'users',
+        let: { assignedById: '$assignedBy', assignedToId: '$assignedTo' },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $or: [
+                  { $eq: ['$_id', '$$assignedById'] },
+                  { $eq: ['$_id', '$$assignedToId'] }
+                ]
+              }
+            }
+          },
+          { $project: { _id: 1, firstName: 1, lastName: 1, email: 1 } }
+        ],
+        as: 'users'
+      }
     }
+  ]);
 
-    await Promise.all(recipients.map((rid) => notificationService.sendNotification({
-      recipient: rid,
+  if (populatedTask) {
+    const recipients = populatedTask.users.map(user => ({
+      recipient: user._id,
       sender: req.user._id,
       type: 'task_deleted',
       title: `Task Deleted: ${populatedTask.title}`,
       message: `The task "${populatedTask.title}" has been deleted by ${req.user.firstName} ${req.user.lastName}.`,
       priority: populatedTask.priority,
-      data: { taskId: populatedTask._id, projectName: populatedTask.project, priority: populatedTask.priority, dueDate: populatedTask.dueDate },
-      channels: { inApp: { sent: false, read: false }, email: { sent: false }, websocket: { sent: false } },
-    })));
-  } catch (err) {
-    console.error('Failed to send task deletion notifications:', err.message);
+      data: {
+        taskId: populatedTask._id,
+        projectName: populatedTask.project,
+        priority: populatedTask.priority,
+        dueDate: populatedTask.dueDate
+      }
+    }));
+
+    // Queue batch notifications for deletion
+    if (recipients.length > 0) {
+      await queues['notification-batches'].add('task-deletion', {
+        notifications: recipients
+      }, {
+        priority: populatedTask.priority === 'critical' ? 1 : 2,
+        attempts: 3,
+        delay: populatedTask.priority === 'critical' ? 0 : 5000 // 5s delay for non-critical tasks
+      });
+    }
   }
 
   res.json({
@@ -512,69 +827,104 @@ const deleteTask = asyncHandler(async (req, res) => {
 // @route   GET /api/tasks/stats
 // @access  Private
 const getTaskStats = asyncHandler(async (req, res) => {
-  const userId = req.user._id;
+  try {
+    const userId = req.user._id;
 
-  // Get basic task statistics
-  const stats = await Task.getTaskStats(userId);
+    // Validate any query parameters
+    const { 
+      projectLimit = 10, 
+      dayRange = 7 
+    } = req.query;
 
-  // Get overdue tasks
-  const overdueTasks = await Task.getOverdueTasks(userId);
+    // Validate the day range for upcoming tasks (1-30 days)
+    const validDayRange = Math.min(Math.max(parseInt(dayRange) || 7, 1), 30);
 
-  // Get upcoming tasks (next 7 days)
-  const upcomingTasks = await Task.getUpcomingTasks(userId, 7);
+    // Get basic task statistics with proper validation
+    const stats = await Task.getTaskStats(userId);
 
-  // Get tasks by priority
-  const priorityStats = await Task.aggregate([
-    { $match: { assignedTo: userId, isActive: true } },
-    {
-      $group: {
-        _id: '$priority',
-        count: { $sum: 1 },
+    // Get overdue tasks
+    const overdueTasks = await Task.getOverdueTasks(userId);
+
+    // Get upcoming tasks with validated range
+    const upcomingTasks = await Task.getUpcomingTasks(userId, validDayRange);
+
+    // Get tasks by priority with validation
+    const priorityStats = await Task.aggregate([
+      { 
+        $match: { 
+          assignedTo: userId, 
+          isActive: true,
+          priority: { $in: ['low', 'medium', 'high', 'critical'] }
+        } 
       },
-    },
-  ]);
-
-  // Get tasks by project
-  const projectStats = await Task.aggregate([
-    { $match: { assignedTo: userId, isActive: true } },
-    {
-      $group: {
-        _id: '$project',
-        count: { $sum: 1 },
-        completed: {
-          $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] },
+      {
+        $group: {
+          _id: '$priority',
+          count: { $sum: 1 },
         },
       },
-    },
-    { $sort: { count: -1 } },
-    { $limit: 10 },
-  ]);
+    ]);
 
-  // Calculate completion rate
-  const completionRate = stats.total > 0
-    ? Math.round((stats.completed / stats.total) * 100) : 0;
+    // Get tasks by project with validation and sanitization
+    const { limit: validProjectLimit } = validatePaginationParams(1, projectLimit, 20);
+    const projectStats = await Task.aggregate([
+      { 
+        $match: { 
+          assignedTo: userId, 
+          isActive: true,
+          project: { $exists: true, $ne: null }
+        } 
+      },
+      {
+        $group: {
+          _id: '$project',
+          count: { $sum: 1 },
+          completed: {
+            $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] },
+          },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: validProjectLimit },
+    ]);
 
-  res.json({
-    success: true,
-    data: {
-      taskStats: stats,
-      completionRate,
-      overdueTasks: overdueTasks.length,
-      upcomingTasks: upcomingTasks.length,
-      priorityDistribution: priorityStats.reduce((acc, item) => {
-        acc[item._id] = item.count;
-        return acc;
-      }, {
-        low: 0, medium: 0, high: 0, critical: 0,
-      }),
-      projectStats: projectStats.map((project) => ({
-        name: project._id,
-        totalTasks: project.count,
-        completedTasks: project.completed,
-        progress: Math.round((project.completed / project.count) * 100),
-      })),
-    },
-  });
+    // Calculate completion rate
+    const completionRate = stats.total > 0
+      ? Math.round((stats.completed / stats.total) * 100) : 0;
+
+    res.json({
+      success: true,
+      data: {
+        taskStats: stats,
+        completionRate,
+        overdueTasks: overdueTasks.length,
+        upcomingTasks: upcomingTasks.length,
+        priorityDistribution: priorityStats.reduce((acc, item) => {
+          acc[item._id] = item.count;
+          return acc;
+        }, {
+          low: 0, medium: 0, high: 0, critical: 0,
+        }),
+        projectStats: projectStats.map((project) => ({
+          name: validator.escape(project._id), // Sanitize project names for XSS
+          totalTasks: project.count,
+          completedTasks: project.completed,
+          progress: Math.round((project.completed / project.count) * 100),
+        })),
+        meta: {
+          projectLimit: validProjectLimit,
+          dayRange: validDayRange
+        }
+      },
+    });
+  } catch (error) {
+    console.error('Task stats error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching task statistics',
+      error: error.message
+    });
+  }
 });
 
 // @desc    Add comment to task
@@ -583,14 +933,23 @@ const getTaskStats = asyncHandler(async (req, res) => {
 const addComment = asyncHandler(async (req, res) => {
   const { text } = req.body;
 
-  if (!text || text.trim().length === 0) {
-    return res.status(400).json({
-      success: false,
-      message: 'Comment text is required',
-    });
-  }
+  try {
+    // Validate and sanitize comment text
+    if (!text || text.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Comment text is required',
+      });
+    }
 
-  const task = await Task.findById(req.params.id);
+    // Validate length and characters
+    const sanitizedText = validateStringLength(text.trim(), 'Comment', VALIDATION_CONSTANTS.TASK.COMMENT);
+    validateCharacters(sanitizedText, 'Comment', VALIDATION_CONSTANTS.TASK.COMMENT.PATTERN);
+
+    // Additional XSS protection
+    req.body.text = validator.escape(sanitizedText);
+
+    const task = await Task.findById(req.params.id);
 
   if (!task) {
     return res.status(404).json({
@@ -610,7 +969,7 @@ const addComment = asyncHandler(async (req, res) => {
 
   task.comments.push({
     user: req.user._id,
-    text: text.trim(),
+    text: req.body.text, // Using our validated and sanitized text
   });
 
   await task.save();
@@ -644,27 +1003,43 @@ const addComment = asyncHandler(async (req, res) => {
     message: 'Comment added successfully',
     data: task.comments[task.comments.length - 1],
   });
+  } catch (err) {
+    console.error('Add comment error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Error adding comment',
+      error: err.message,
+    });
+  }
 });
 
 // @desc    Get recent tasks for activity feed
 // @route   GET /api/tasks/recent
 // @access  Private
 const getRecentTasks = asyncHandler(async (req, res) => {
-  const { limit = 10 } = req.query;
+  try {
+    // Validate and sanitize the limit parameter with a maximum of 50
+    const { limit: validatedLimit } = validatePaginationParams(1, req.query.limit || 10, 50);
 
-  const recentTasks = await Task.find({
-    assignedTo: req.user._id,
-    isActive: true,
-  })
-    .populate('assignedBy', 'firstName lastName email')
-    .sort({ updatedAt: -1 })
-    .limit(parseInt(limit))
-    .select('title status priority project updatedAt');
+    const recentTasks = await Task.find({
+      assignedTo: req.user._id,
+      isActive: true,
+    })
+      .populate('assignedBy', 'firstName lastName email')
+      .sort({ updatedAt: -1 })
+      .limit(validatedLimit)
+      .select('title status priority project updatedAt');
 
-  res.json({
-    success: true,
-    data: recentTasks,
-  });
+    res.json({
+      success: true,
+      data: recentTasks,
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message,
+    });
+  }
 });
 
 module.exports = {
