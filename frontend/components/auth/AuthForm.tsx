@@ -67,11 +67,7 @@ export default function AuthForm({ onAuthSuccess, redirectTo }: AuthFormProps) {
       
       // Check if error is due to email verification requirement
       if (error.message && error.message.includes('verify your email')) {
-        setMessage({
-          type: 'warning',
-          text: error.message
-        })
-        toast.error(error.message)
+        toast.warning(error.message)
       } else {
         toast.error(error.message || 'Login failed')
       }
@@ -125,12 +121,10 @@ export default function AuthForm({ onAuthSuccess, redirectTo }: AuthFormProps) {
       console.log('Signup API response:', response)
       
       // Check if email verification is required
-      if (response.requiresEmailVerification) {
-        toast.success(response.message || 'Account created successfully! Please check your email to verify your account.')
-        setMessage({
-          type: 'success',
-          text: response.message || 'Account created successfully! Please check your email to verify your account before logging in.'
-        })
+      const signupResponse = response as { token?: string; user?: any; requiresEmailVerification?: boolean; message?: string }
+      
+      if (signupResponse.requiresEmailVerification) {
+        toast.success(signupResponse.message || 'Account created successfully! Please check your email to verify your account.')
         // Don't store token or redirect - user needs to verify email first
         return
       }

@@ -108,7 +108,9 @@ describe('Real-time Collaboration', () => {
       clientSocket1.on('note:join', (data) => {
         expect(data.noteId).toBe(testNote._id.toString());
         expect(data.note).toBeDefined();
+        expect(data.note._id.toString()).toBe(testNote._id.toString());
         expect(data.note.title).toBe('Test Note');
+        expect(data.note.content).toBe('Initial content');
         expect(data.note.version).toBe(1);
         expect(data.userPermission).toBe('owner');
         done();
@@ -124,9 +126,12 @@ describe('Real-time Collaboration', () => {
         joinCount++;
         if (joinCount === 1) {
           // First join is user1's own join
+          expect(data.noteId).toBe(testNote._id.toString());
           expect(data.note).toBeDefined();
+          expect(data.note._id.toString()).toBe(testNote._id.toString());
         } else if (joinCount === 2) {
           // Second join is notification about user2
+          expect(data.noteId).toBe(testNote._id.toString());
           expect(data.userId).toBe(user2._id.toString());
           expect(data.username).toBe('user2');
           done();

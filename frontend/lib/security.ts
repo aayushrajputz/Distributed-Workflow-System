@@ -226,6 +226,93 @@ export class RateLimiter {
   }
 }
 
+/**
+ * Sanitizes CSS content to prevent XSS attacks while preserving valid styling.
+ * 
+ * Allowed:
+ * - Color formats: hex (#rgb, #rrggbb, #rgba, #rrggbbaa), rgb(a)(), hsl(a)()
+ * - CSS custom properties: var(--color-*) and --color-[a-zA-Z0-9_-]+
+ * - Safe characters: letters, numbers, spaces, and common CSS punctuation
+ * - Safe url() with http(s) and data:image protocols
+ * 
+ * Blocked:
+ * - CSS comments
+ * - @import and @charset at-rules
+ * - expression() calls
+ * - javascript:, data:text, vbscript: protocols in url()
+ * - HTML tags like <script>, <style>, <iframe>
+ * - Unsafe characters and control sequences
+ * 
+ * @param css - The CSS string to sanitize
+ * @returns Safe CSS string, or empty string on invalid input
+ */
+export function sanitizeCSS(css: string): string {
+  if (typeof css !== 'string') return '';
+  
+  try {
+    let sanitized = css;
+    
+    // Remove CSS comments
+    sanitized = sanitized.replace(/\/\*[\s\S]*?\*\//g, '');
+    
+    // Remove dangerous at-rules
+    sanitized = sanitized.replace(/@import\s+[^;]+;?/gi, '');
+    sanitized = sanitized.replace(/@charset\s+[^;]+;?/gi, '');
+    
+    // Remove expression() calls (IE-specific)
+    sanitized = sanitized.replace(/expression\s*\([^)]*\)/gi, '');
+    
+    // Remove HTML tags first (before URL processing to avoid conflicts)
+    sanitized = sanitized.replace(/<\/?(?:script|style|iframe|object|embed|link|meta)[^>]*>/gi, '');
+    sanitized = sanitized.replace(/<[^>]*>/g, '');
+    
+    // Remove dangerous JavaScript and data URLs, but preserve safe ones
+    sanitized = sanitized.replace(/javascript\s*:/gi, '');
+    sanitized = sanitized.replace(/vbscript\s*:/gi, '');
+    sanitized = sanitized.replace(/data\s*:\s*(?!image\/)/gi, '');
+    
+    // Sanitize url() values - only allow http(s) and data:image
+    sanitized = sanitized.replace(/url\s*\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (match, quote, url) => {
+      const trimmedUrl = url.trim();
+      if (trimmedUrl.match(/^https?:\/\//i) || trimmedUrl.match(/^data:image\//i)) {
+        return `url(${quote}${trimmedUrl}${quote})`;
+      }
+      return ''; // Remove unsafe URLs
+    });
+    
+    // Remove any remaining dangerous function calls
+    sanitized = sanitized.replace(/(?:alert|eval|setTimeout|setInterval|Function|XMLHttpRequest)\s*\(/gi, '');
+    
+    // Whitelist safe characters: word chars, spaces, CSS punctuation, color chars
+    sanitized = sanitized.replace(/[^\w\s:#;,.\-_%()/"'!+*?,=]/g, '');
+    
+    // Process var() functions first to preserve valid custom property references
+    const varFunctions = new Set<string>();
+    sanitized = sanitized.replace(/var\s*\(\s*(--color-[^)]*)\s*\)/g, (match, propName) => {
+      const cleanPropName = propName.trim();
+      if (cleanPropName.match(/^--color-[a-zA-Z0-9_-]+$/)) {
+        varFunctions.add(cleanPropName);
+        return `var(${cleanPropName})`;
+      }
+      return 'var(--color-invalid)';
+    });
+    
+    // Validate standalone custom properties format --color-[safe-chars]
+    // Skip properties that are already validated in var() functions
+    sanitized = sanitized.replace(/--color-[^:;\s)]+/g, (match) => {
+      if (varFunctions.has(match) || match.match(/^--color-[a-zA-Z0-9_-]+$/)) {
+        return match;
+      }
+      return '--color-invalid'; // Replace invalid custom properties
+    });
+    
+    return sanitized.trim();
+  } catch (error) {
+    console.error('CSS sanitization failed:', error);
+    return '';
+  }
+}
+
 // Content Security Policy helper
 export const CSP = {
   nonce: (): string => {
@@ -244,6 +331,18 @@ export const CSP = {
       hash = hash & hash; // Convert to 32-bit integer
     }
     return hash.toString(16);
+  },
+
+  generatePolicyString: (nonce: string): string => {
+    return [
+      "default-src 'self'",
+      `script-src 'self' 'nonce-${nonce}'`,
+      `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'`,
+      "img-src 'self' data: https:",
+      "font-src 'self'",
+      "connect-src 'self'",
+      "frame-ancestors 'none'"
+    ].join('; ');
   },
 };
 

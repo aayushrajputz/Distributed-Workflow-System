@@ -1,11 +1,21 @@
 // Extend Jest matchers if needed
 require('jest-extended');
 
+const nock = require('nock');
+const { Server } = require('socket.io');
+const { createServer } = require('http');
+const Client = require('socket.io-client');
+const { promisify } = require('util');
+
 // Set test environment variables
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = 'test-jwt-secret-key-for-unit-tests';
 process.env.API_KEY_SECRET = 'test-api-key-secret-for-unit-tests';
 process.env.ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+process.env.GITHUB_WEBHOOK_SECRET = 'test-github-webhook-secret';
+process.env.ZAPIER_WHITELIST = 'localhost,.company.com';
+process.env.SLACK_WEBHOOK_URL = 'https://hooks.slack.com/test-webhook';
+process.env.JIRA_DOMAIN = 'test-domain.atlassian.net';
 
 // Silence console logs during tests
 global.console = {
@@ -17,8 +27,59 @@ global.console = {
   debug: jest.fn(),
 };
 
-// Set default test timeout
-jest.setTimeout(10000);
+// Configure nock for HTTP mocking
+nock.disableNetConnect();
+nock.enableNetConnect('127.0.0.1');
+nock.enableNetConnect('localhost');
+
+// Socket testing utilities
+global.createTestSocketServer = async (handler) => {
+  const httpServer = createServer();
+  const io = new Server(httpServer);
+  handler(io);
+  
+  await new Promise(resolve => httpServer.listen(0, resolve));
+  const port = httpServer.address().port;
+  
+  return {
+    io,
+    httpServer,
+    port,
+    url: `http://localhost:${port}`
+  };
+};
+
+global.createTestSocketClient = async (url, token) => {
+  const client = Client(url, {
+    auth: { token },
+    transports: ['websocket'],
+    forceNew: true
+  });
+
+  await new Promise((resolve, reject) => {
+    client.on('connect', resolve);
+    client.on('connect_error', reject);
+  });
+
+  return client;
+};
+
+global.waitForSocketEvent = (socket, event, timeout = 5000) => {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timeout waiting for event: ${event}`));
+    }, timeout);
+
+    socket.once(event, (...args) => {
+      clearTimeout(timer);
+      resolve(args);
+    });
+  });
+};
+
+// Set test timeout based on test suite
+const timeout = process.env.TEST_SUITE === 'integration' ? 30000 : 10000;
+jest.setTimeout(timeout);
 
 // Add custom matchers
 expect.extend({

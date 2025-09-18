@@ -2,19 +2,17 @@ const { MongoMemoryServer } = require('mongodb-memory-server');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 
-let mongoServer;
-
 // Set test environment variables
 process.env.NODE_ENV = 'test';
-process.env.JWT_SECRET = 'test-jwt-secret-key-for-unit-tests';
+process.env.JWT_SECRET = 'test-jwt-secret-key-for-unit-tests-very-long-secret';
 process.env.API_KEY_SECRET = 'test-api-key-secret-for-unit-tests';
 process.env.ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+process.env.MONGODB_URI = 'mongodb://localhost/test-db';
 
 // Global test setup
 module.exports = async () => {
-  // Start MongoDB Memory Server
-  mongoServer = await MongoMemoryServer.create();
-  const mongoUri = mongoServer.getUri();
+  // Connect to the MongoDB Memory Server started in globalSetup
+  const mongoUri = process.env.MONGO_URI;
 
   // Connect Mongoose to the memory server
   await mongoose.connect(mongoUri, {
@@ -77,11 +75,4 @@ module.exports = async () => {
   };
 };
 
-// Cleanup after all tests
-module.exports.teardown = async () => {
-  await mongoose.disconnect();
-  await mongoServer.stop();
-
-  // Restore original Date
-  global.Date = global.originalDate;
-};
+// No teardown needed here as it's handled in globalTeardown.js

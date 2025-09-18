@@ -22,12 +22,10 @@ module.exports = async () => {
   }
 
   // Stop MongoDB memory server
-  if (state.mongoPid) {
+  if (state.instanceInfo) {
     try {
-      const server = new MongoMemoryServer({
-        instance: {
-          port: new URL(state.mongoUri).port
-        }
+      const server = await MongoMemoryServer.create({
+        instance: state.instanceInfo
       });
       await server.stop();
     } catch (err) {

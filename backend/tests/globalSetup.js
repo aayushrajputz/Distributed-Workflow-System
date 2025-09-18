@@ -14,7 +14,7 @@ module.exports = async () => {
   // Save connection info to file for teardown
   const state = {
     mongoUri,
-    mongoPid: mongoServer.childProcess.pid
+    instanceInfo: mongoServer.instanceInfo
   };
   
   fs.writeFileSync(config.stateFile, JSON.stringify(state));

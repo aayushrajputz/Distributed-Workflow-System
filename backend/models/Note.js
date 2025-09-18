@@ -166,7 +166,7 @@ noteSchema.methods.removeCollaborator = function (userId) {
 
 // Pre-save middleware to update version and lastEditedAt
 noteSchema.pre('save', function (next) {
-  if (this.isModified('content') || this.isModified('title')) {
+  if (!this.isNew && (this.isModified('content') || this.isModified('title'))) {
     this.version += 1;
     this.lastEditedAt = new Date();
   }

@@ -5,10 +5,29 @@ module.exports = {
   setupFilesAfterEnv: ['<rootDir>/tests/jest.setup.js'],
   globalSetup: '<rootDir>/tests/globalSetup.js',
   globalTeardown: '<rootDir>/tests/globalTeardown.js',
-  testTimeout: 10000,
+  testTimeout: 30000,
   detectOpenHandles: true,
   forceExit: true,
   verbose: true,
+
+  // Integration test specific configuration
+  projects: [
+    {
+      displayName: 'integration',
+      testMatch: ['<rootDir>/tests/integration/**/*.test.js'],
+      testTimeout: 30000,
+      maxWorkers: 1,
+      setupFilesAfterEnv: [
+        '<rootDir>/tests/jest.setup.js',
+        '<rootDir>/tests/integration/setup.js'
+      ]
+    },
+    {
+      displayName: 'unit',
+      testMatch: ['<rootDir>/tests/**/*.test.js'],
+      testPathIgnorePatterns: ['/node_modules/', '/dist/', '/coverage/', '/tests/integration/']
+    }
+  ],
 
   // Coverage configuration - initially scoped to core components
   collectCoverage: true,
@@ -16,8 +35,14 @@ module.exports = {
     'models/**/*.js',
     'controllers/**/*.js',
     'middleware/**/*.js',
+    'services/**/*.js',
+    'routes/**/*.js',
+    'sockets/**/*.js',
+    'utils/**/*.js',
     '!**/node_modules/**',
-    '!**/tests/**'
+    '!**/tests/**',
+    '!**/coverage/**',
+    '!**/dist/**'
   ],
   coverageDirectory: './coverage',
   coverageReporters: ['text', 'lcov', 'html'],
@@ -33,6 +58,24 @@ module.exports = {
       branches: 70,
       functions: 80,
       lines: 80
+    },
+    './services/': {
+      statements: 70,
+      branches: 60,
+      functions: 70,
+      lines: 70
+    },
+    './routes/': {
+      statements: 80,
+      branches: 70,
+      functions: 80,
+      lines: 80
+    },
+    './sockets/': {
+      statements: 75,
+      branches: 65,
+      functions: 75,
+      lines: 75
     }
   },
 

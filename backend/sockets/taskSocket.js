@@ -5,71 +5,76 @@ const notificationService = require('../services/notificationService');
 const { getPrometheusService } = require('../services/prometheusService');
 const logger = require('../utils/logger');
 
+// Configuration constants
+const AUTH_RATE_LIMIT = {
+  maxFailedAttempts: 5,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  blockDurationMs: 30 * 60 * 1000, // 30 minutes
+};
+
+const METRICS_DEBOUNCE_MS = 2000;
+const TYPING_THROTTLE_MS = 1000;
+const TASK_UPDATE_THROTTLE_MS = 500;
+const TOKEN_WARNING_THRESHOLD_MS = 5 * 60 * 1000; // warn 5m before expiry
+const STALE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const TOKEN_CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
+const ADMIN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Whether to trust X-Forwarded-For headers for client IPs
+const TRUST_PROXY = String(process.env.TRUST_PROXY || '').toLowerCase() === 'true';
+
 class TaskSocketHandler {
   constructor(io) {
     this.io = io;
-    this.connectedUsers = new Map(); // userId -> Set<socketId> mapping
-    this.userRooms = new Map(); // socketId -> userId mapping
 
-    // Authentication rate limiting
-    this.authAttempts = new Map(); // IP -> { attempts: number, lastAttempt: timestamp, blocked: boolean }
-    this.authRateLimit = {
-      maxAttempts: 5,
-      windowMs: 15 * 60 * 1000, // 15 minutes
-      blockDurationMs: 30 * 60 * 1000 // 30 minutes
-    };
+    // Connection tracking
+    this.connectedUsers = new Map(); // userId -> Set<socketId>
+    this.userRooms = new Map(); // socketId -> userId
+    this.socketConnectedAt = new Map(); // socketId -> timestamp
 
-    // Token expiration monitoring
-    this.tokenMonitoring = new Map(); // userId -> { token, expiresAt, warningScheduled }
-    this.tokenWarningThreshold = 5 * 60 * 1000; // 5 minutes before expiry
+    // Auth rate limiting state: ip -> { failures, firstAttemptAt, blockedUntil }
+    this.authAttempts = new Map();
+
+    // Token expiration monitoring: userId -> { token, expiresAt, warningScheduled, warningTimeoutId }
+    this.tokenMonitoring = new Map();
     this.tokenCheckInterval = null;
 
-    // Admin/manager caching
-    this._adminManagerIds = [];
-    this._adminCacheExpiresAt = 0; // ms timestamp
-    this._adminCacheTTL = 5 * 60 * 1000; // 5m
+    // Admin/manager cache
+    this.adminManagerCache = new Map(); // userId -> { role, socketIds }
+    this.cacheExpiry = 0;
 
-      // Metrics and throttling state
-    this._metricsDebounceMs = 2000;
+    // Metrics
+    this._metricsDebounceMs = METRICS_DEBOUNCE_MS;
     this._metricsTimer = null;
-    this.metricsUpdateQueue = new Set(); // For queuing taskIds that need metrics update
-    
-    // Throttling maps and settings
-    this._typingThrottle = new Map(); // key: `${userId}:${taskId}` -> timeoutId
-    this._typingThrottleMs = 1000;
-    this.typingThrottlers = new Map(); // For backward compatibility
-    
-    // Task update throttling
-    this._taskUpdateThrottle = new Map(); // taskId -> { timer, lastPayload }
-    this._taskThrottleMs = 500;
-    this.taskUpdateThrottlers = new Map(); // For backward compatibility
+    this.metricsUpdateQueue = new Set();
 
-    // Admin/manager caching
-    this.adminManagerCache = new Map();
-    this.cacheExpiry = 0;    this.setupSocketHandlers();
-    // Start periodic cleanup of stale connections
-    this._staleCleanupInterval = setInterval(() => this.cleanupStaleConnections(), 5 * 60 * 1000); // every 5 minutes
+    // Throttling
+    this._typingThrottle = new Map(); // key `${userId}:${taskId}` -> timeoutId
+    this.taskUpdateThrottlers = new Map(); // taskId -> lastTimestamp
+
+    // Handlers
+    this.setupSocketHandlers();
+
+    // Periodic cleanup
+    this._staleCleanupInterval = setInterval(() => this.cleanupStaleConnections(), STALE_CLEANUP_INTERVAL_MS);
   }
 
-  // Socket Set Management Utilities
+ 
   addUserSocket(userId, socketId) {
-    if (!this.connectedUsers.has(userId)) {
-      this.connectedUsers.set(userId, new Set());
-    }
+    if (!this.connectedUsers.has(userId)) this.connectedUsers.set(userId, new Set());
     this.connectedUsers.get(userId).add(socketId);
+    this.socketConnectedAt.set(socketId, Date.now());
   }
 
   removeUserSocket(userId, socketId) {
     const userSockets = this.connectedUsers.get(userId);
     if (userSockets) {
       userSockets.delete(socketId);
-      if (userSockets.size === 0) {
-        this.connectedUsers.delete(userId);
-      }
+      if (userSockets.size === 0) this.connectedUsers.delete(userId);
     }
+    this.socketConnectedAt.delete(socketId);
   }
 
-  // Utility method for validating and emitting to user sockets
   emitToUserSockets(userId, event, payload) {
     const userSockets = this.connectedUsers.get(userId);
     if (!userSockets) return 0;
@@ -82,135 +87,25 @@ class TaskSocketHandler {
         validEmitCount++;
       } else {
         this.removeUserSocket(userId, socketId);
-        console.log(`🔍 Pruned stale socket ${socketId} for user ${userId} during emit`);
+        logger.debug(`Pruned stale socket ${socketId} for user ${userId} during emit`);
       }
     }
     return validEmitCount;
   }
 
-  // Admin/Manager Cache Management
-  async refreshAdminManagerCache() {
-    const users = await User.find({ $or: [{ role: 'admin' }, { role: 'manager' }], isActive: true }).select('_id');
-    this._adminManagerIds = users.map(u => u._id.toString());
-    this._adminCacheExpiresAt = Date.now() + this._adminCacheTTL;
-  }
-
-  async getAdminManagerIds() {
-    if (!this._adminManagerIds.length || Date.now() > this._adminCacheExpiresAt) {
-      await this.refreshAdminManagerCache();
-    }
-    return this._adminManagerIds;
-  }
-
-  invalidateAdminManagerCache() {
-    this._adminCacheExpiresAt = 0;
-  }
-
-  // Role change handler
-  handleUserRoleChange(userId, newRole) {
-    // For now, just invalidate; future enhancements can adjust rooms/permissions
-    this.invalidateAdminManagerCache();
-  }
-
-  // Authentication rate limiting methods
-  getClientIP(socket) {
-    const headers = socket.handshake.headers;
-    return headers['x-forwarded-for']?.split(',')[0].trim() || 
-           headers['x-real-ip'] || 
-           socket.handshake.address ||
-           socket.conn.remoteAddress;
-  }
-
-  checkAuthRateLimit(clientIP) {
-    const now = Date.now();
-    const attempt = this.authAttempts.get(clientIP);
-
-    if (!attempt) return true;
-
-    // Check if IP is blocked
-    if (attempt.blocked) {
-      if (now - attempt.lastAttempt > this.authRateLimit.blockDurationMs) {
-        // Unblock if block duration has passed
-        this.authAttempts.delete(clientIP);
-        return true;
-      }
-      return false;
-    }
-
-    // Check if attempts have expired
-    if (now - attempt.lastAttempt > this.authRateLimit.windowMs) {
-      this.authAttempts.delete(clientIP);
-      return true;
-    }
-
-    // Check if max attempts exceeded
-    return attempt.attempts < this.authRateLimit.maxAttempts;
-  }
-
-  recordAuthAttempt(clientIP, success) {
-    const now = Date.now();
-    const attempt = this.authAttempts.get(clientIP) || { attempts: 0, lastAttempt: now, blocked: false };
-
-    // Reset attempts if window has expired
-    if (now - attempt.lastAttempt > this.authRateLimit.windowMs) {
-      attempt.attempts = 0;
-      attempt.blocked = false;
-    }
-
-    attempt.attempts++;
-    attempt.lastAttempt = now;
-
-    // Block IP if max attempts exceeded
-    if (!success && attempt.attempts >= this.authRateLimit.maxAttempts) {
-      attempt.blocked = true;
-      logger.warn(`IP ${clientIP} blocked due to too many failed authentication attempts`);
-    }
-
-    this.authAttempts.set(clientIP, attempt);
-
-    // Log authentication attempt
-    logger.info(`Socket auth attempt from ${clientIP}: ${success ? 'success' : 'failed'} (attempts: ${attempt.attempts})`);
-  }
-
-  cleanupAuthAttempts() {
-    const now = Date.now();
-    for (const [ip, attempt] of this.authAttempts.entries()) {
-      if (now - attempt.lastAttempt > this.authRateLimit.windowMs) {
-        this.authAttempts.delete(ip);
-      }
-    }
-  }
-
-  // Typing throttle helper
-  _canSendTyping(userId, taskId) {
-    const key = `${userId}:${taskId}`;
-    if (this._typingThrottle.has(key)) return false;
-    const t = setTimeout(() => this._typingThrottle.delete(key), this._typingThrottleMs);
-    this._typingThrottle.set(key, t);
-    return true;
-  }
-
   getUserSockets(userId) {
     const sockets = this.connectedUsers.get(userId);
     if (!sockets) return new Set();
-    
-    // Filter out stale sockets during retrieval
+
     const validSockets = new Set();
     for (const socketId of sockets) {
-      if (this.io.sockets.sockets.has(socketId)) {
-        validSockets.add(socketId);
-      }
+      if (this.io.sockets.sockets.has(socketId)) validSockets.add(socketId);
     }
-    
-    // Update the stored set if we removed any stale sockets
+
     if (validSockets.size !== sockets.size) {
-      if (validSockets.size === 0) {
-        this.connectedUsers.delete(userId);
-      } else {
-        this.connectedUsers.set(userId, validSockets);
-      }
+      if (validSockets.size === 0) this.connectedUsers.delete(userId);
+      else this.connectedUsers.set(userId, validSockets);
     }
-    
     return validSockets;
   }
 
@@ -218,46 +113,9 @@ class TaskSocketHandler {
     return this.getUserSockets(userId).size > 0;
   }
 
-  cleanupStaleConnections() {
-    console.log('🧹 Running stale connection cleanup...');
-    for (const [userId, sockets] of this.connectedUsers.entries()) {
-      const validSockets = new Set();
-      for (const socketId of sockets) {
-        if (this.io.sockets.sockets.has(socketId)) {
-          validSockets.add(socketId);
-        } else {
-          this.userRooms.delete(socketId);
-          console.log(`🗑️ Removed stale socket ${socketId} for user ${userId}`);
-        }
-      }
-      if (validSockets.size === 0) {
-        this.connectedUsers.delete(userId);
-        console.log(`🗑️ Removed user ${userId} with no valid sockets`);
-      } else if (validSockets.size !== sockets.size) {
-        this.connectedUsers.set(userId, validSockets);
-        console.log(`♻️ Updated socket set for user ${userId}: ${validSockets.size} valid sockets`);
-      }
-    }
-
-    // Clean up throttling maps
-    const now = Date.now();
-    for (const [key, timestamp] of this.typingThrottlers.entries()) {
-      if (now - timestamp > 1000) { // 1 second window
-        this.typingThrottlers.delete(key);
-      }
-    }
-    for (const [key, timestamp] of this.taskUpdateThrottlers.entries()) {
-      if (now - timestamp > 500) { // 500ms window
-        this.taskUpdateThrottlers.delete(key);
-      }
-    }
-  }
-
-  // Admin/Manager Cache Management Methods
+  // ============ Admin Cache ============
   async refreshAdminManagerCache() {
-    console.log('🔄 Refreshing admin/manager cache...');
     const startTime = Date.now();
-
     try {
       const managers = await User.find({
         $or: [{ role: 'admin' }, { role: 'manager' }],
@@ -274,27 +132,11 @@ class TaskSocketHandler {
           });
         }
       }
-
-      this.cacheExpiry = Date.now() + 5 * 60 * 1000; // 5 minutes TTL
-      const duration = Date.now() - startTime;
-      console.log(`✅ Admin/manager cache refreshed in ${duration}ms, ${this.adminManagerCache.size} users cached`);
+      this.cacheExpiry = Date.now() + ADMIN_CACHE_TTL_MS;
+      logger.info(`Admin/manager cache refreshed in ${Date.now() - startTime}ms, ${this.adminManagerCache.size} users cached`);
     } catch (error) {
-      console.error('❌ Error refreshing admin/manager cache:', error);
+      logger.error('Error refreshing admin/manager cache', { error });
       throw error;
-    }
-  }
-
-  async getAdminManagerSockets() {
-    if (!this.isCacheValid()) {
-      await this.refreshAdminManagerCache();
-    }
-    return this.adminManagerCache;
-  }
-
-  invalidateUserCache(userId) {
-    if (this.adminManagerCache.has(userId)) {
-      this.adminManagerCache.delete(userId);
-      console.log(`🔄 Invalidated cache entry for user ${userId}`);
     }
   }
 
@@ -302,72 +144,141 @@ class TaskSocketHandler {
     return Date.now() < this.cacheExpiry && this.adminManagerCache.size > 0;
   }
 
-  // Event throttling methods
-  throttleTypingEvent(userId, taskId) {
-    const key = `${userId}_${taskId}`;
-    const now = Date.now();
-    const lastUpdate = this.typingThrottlers.get(key);
+  async getAdminManagerSockets() {
+    if (!this.isCacheValid()) await this.refreshAdminManagerCache();
+    return this.adminManagerCache;
+  }
 
-    if (lastUpdate && now - lastUpdate < 1000) { // 1 second throttle
-      return false;
+  invalidateUserCache(userId) {
+    if (this.adminManagerCache.has(userId)) {
+      this.adminManagerCache.delete(userId);
+      logger.debug(`Invalidated cache entry for user ${userId}`);
+    }
+  }
+
+  handleUserRoleChange(userId, newRole) {
+    // Invalidate specific user and force cache refresh soon
+    this.invalidateUserCache(userId);
+    this.cacheExpiry = 0;
+  }
+
+  // ============ Rate Limiting ============
+  sanitizeIP(ip) {
+    if (!ip) return 'unknown';
+    // Strip IPv6 mapped IPv4 prefix ::ffff:
+    return ip.startsWith('::ffff:') ? ip.substring(7) : ip;
+  }
+
+  getClientIP(socket) {
+    const headers = socket.handshake.headers || {};
+    let ip;
+    if (TRUST_PROXY) {
+      const xff = (headers['x-forwarded-for'] || '').toString();
+      ip = xff ? xff.split(',')[0].trim() : (headers['x-real-ip'] || socket.handshake.address || socket.conn?.remoteAddress);
+    } else {
+      ip = socket.handshake.address || socket.conn?.remoteAddress;
+    }
+    return this.sanitizeIP(ip || 'unknown');
+  }
+
+  checkAuthRateLimit(clientIP) {
+    const now = Date.now();
+    const rec = this.authAttempts.get(clientIP);
+    if (!rec) return true;
+
+    if (rec.blockedUntil && now < rec.blockedUntil) return false;
+
+    // Reset window if expired
+    if (rec.firstAttemptAt && now - rec.firstAttemptAt > AUTH_RATE_LIMIT.windowMs) {
+      this.authAttempts.delete(clientIP);
+      return true;
+    }
+    return true;
+  }
+
+  recordAuthAttempt(clientIP, success) {
+    const now = Date.now();
+
+    if (success) {
+      // On success, clear any failure tracking
+      this.authAttempts.delete(clientIP);
+      logger.info(`Socket auth success from ${clientIP}`);
+      return;
     }
 
-    this.typingThrottlers.set(key, now);
+    const rec = this.authAttempts.get(clientIP) || { failures: 0, firstAttemptAt: now, blockedUntil: 0 };
+
+    // Reset window if expired
+    if (now - rec.firstAttemptAt > AUTH_RATE_LIMIT.windowMs) {
+      rec.failures = 0;
+      rec.firstAttemptAt = now;
+      rec.blockedUntil = 0;
+    }
+
+    rec.failures += 1;
+
+    if (rec.failures >= AUTH_RATE_LIMIT.maxFailedAttempts) {
+      rec.blockedUntil = now + AUTH_RATE_LIMIT.blockDurationMs;
+      logger.warn(`IP ${clientIP} blocked due to too many failed authentication attempts`);
+    }
+
+    this.authAttempts.set(clientIP, rec);
+    logger.warn(`Socket auth failed from ${clientIP}: failures=${rec.failures}`);
+  }
+
+  cleanupAuthAttempts() {
+    const now = Date.now();
+    for (const [ip, rec] of this.authAttempts.entries()) {
+      if ((rec.blockedUntil && now > rec.blockedUntil) || (rec.firstAttemptAt && now - rec.firstAttemptAt > AUTH_RATE_LIMIT.windowMs)) {
+        this.authAttempts.delete(ip);
+      }
+    }
+  }
+
+  // ============ Typing throttle ============
+  _canSendTyping(userId, taskId) {
+    const key = `${userId}:${taskId}`;
+    if (this._typingThrottle.has(key)) return false;
+    const t = setTimeout(() => this._typingThrottle.delete(key), TYPING_THROTTLE_MS);
+    this._typingThrottle.set(key, t);
     return true;
   }
 
   throttleTaskUpdate(taskId) {
     const now = Date.now();
-    const lastUpdate = this.taskUpdateThrottlers.get(taskId);
-
-    if (lastUpdate && now - lastUpdate < 500) { // 500ms throttle
-      return false;
-    }
-
+    const last = this.taskUpdateThrottlers.get(taskId);
+    if (last && now - last < TASK_UPDATE_THROTTLE_MS) return false;
     this.taskUpdateThrottlers.set(taskId, now);
     return true;
   }
 
-  // Schedule debounced metrics update
-  scheduleMetricsUpdate() {
-    if (this._metricsTimer) clearTimeout(this._metricsTimer);
-    this._metricsTimer = setTimeout(async () => {
-      this._metricsTimer = null;
-      try {
-        const m = await this.computeTaskMetrics();
-        getPrometheusService().updateTaskMetrics({
-          total: m.total,
-          pending: m.pending,
-          in_progress: m.in_progress,
-          completed: m.completed,
-          blocked: m.blocked
-        });
-        this.io.emit('metrics_update', { type: 'tasks', data: m });
-      } catch (e) {
-        console.error('Error in debounced metrics update', e);
-      }
-    }, this._metricsDebounceMs);
-  }
-
-  // Token monitoring methods
+  // ============ Token monitoring ============
   setupTokenMonitoring(userId, token, expiresAt) {
-    this.tokenMonitoring.set(userId, {
-      token,
-      expiresAt,
-      warningScheduled: false
-    });
-
-    // Check if we need to schedule a warning
-    const timeUntilExpiry = expiresAt - Date.now();
-    if (timeUntilExpiry > this.tokenWarningThreshold) {
-      setTimeout(() => {
-        this.sendTokenExpiryWarning(userId);
-      }, timeUntilExpiry - this.tokenWarningThreshold);
+    const existing = this.tokenMonitoring.get(userId);
+    if (existing?.warningTimeoutId) {
+      clearTimeout(existing.warningTimeoutId);
     }
 
-    // Start token check interval if not already running
+    const entry = {
+      token,
+      expiresAt,
+      warningScheduled: false,
+      warningTimeoutId: null,
+    };
+
+    // Schedule warning if appropriate
+    const timeUntilExpiry = expiresAt - Date.now();
+    if (timeUntilExpiry > TOKEN_WARNING_THRESHOLD_MS) {
+      entry.warningTimeoutId = setTimeout(() => {
+        this.sendTokenExpiryWarning(userId);
+      }, timeUntilExpiry - TOKEN_WARNING_THRESHOLD_MS);
+    }
+
+    this.tokenMonitoring.set(userId, entry);
+
+    // Start monitoring loop if needed
     if (!this.tokenCheckInterval) {
-      this.tokenCheckInterval = setInterval(() => this.checkTokenExpirations(), 60000); // Check every minute
+      this.tokenCheckInterval = setInterval(() => this.checkTokenExpirations(), TOKEN_CHECK_INTERVAL_MS);
     }
   }
 
@@ -378,244 +289,301 @@ class TaskSocketHandler {
     monitoring.warningScheduled = true;
     this.tokenMonitoring.set(userId, monitoring);
 
-    const timeLeft = Math.ceil((monitoring.expiresAt - Date.now()) / 60000); // Minutes left
+    const timeLeftMin = Math.max(0, Math.ceil((monitoring.expiresAt - Date.now()) / 60000));
     const warningMessage = {
       type: 'token_expiry_warning',
-      message: `Your session will expire in ${timeLeft} minutes. Please refresh to continue.`,
-      expiresAt: monitoring.expiresAt
+      message: `Your session will expire in ${timeLeftMin} minutes. Please refresh to continue.`,
+      expiresAt: monitoring.expiresAt,
     };
-
-    // Send warning to all user's connected sockets
     this.emitToUserSockets(userId, 'session_warning', warningMessage);
   }
 
   checkTokenExpirations() {
     const now = Date.now();
     for (const [userId, monitoring] of this.tokenMonitoring.entries()) {
-      // If token is expired, disconnect all sockets for this user
       if (now >= monitoring.expiresAt) {
         const userSockets = this.connectedUsers.get(userId);
         if (userSockets) {
           for (const socketId of userSockets) {
             const socket = this.io.sockets.sockets.get(socketId);
             if (socket) {
-              socket.emit('session_expired', {
-                message: 'Your session has expired. Please log in again.'
-              });
+              socket.emit('session_expired', { message: 'Your session has expired. Please log in again.' });
               socket.disconnect(true);
             }
           }
         }
+        if (monitoring.warningTimeoutId) clearTimeout(monitoring.warningTimeoutId);
         this.tokenMonitoring.delete(userId);
         logger.info(`Session expired for user ${userId}, disconnected all sockets`);
-      }
-      // If token is approaching expiry and warning not sent
-      else if (!monitoring.warningScheduled && (monitoring.expiresAt - now) <= this.tokenWarningThreshold) {
+      } else if (!monitoring.warningScheduled && (monitoring.expiresAt - now) <= TOKEN_WARNING_THRESHOLD_MS) {
         this.sendTokenExpiryWarning(userId);
       }
     }
 
-    // Clean up interval if no more tokens to monitor
-    if (this.tokenMonitoring.size === 0) {
+    if (this.tokenMonitoring.size === 0 && this.tokenCheckInterval) {
       clearInterval(this.tokenCheckInterval);
       this.tokenCheckInterval = null;
     }
   }
 
+  // ============ Metrics ============
+  debouncedMetricsUpdate() {
+    if (this._metricsTimer) clearTimeout(this._metricsTimer);
+    this._metricsTimer = setTimeout(async () => {
+      try {
+        const updatedTaskIds = Array.from(this.metricsUpdateQueue);
+        this.metricsUpdateQueue.clear();
+        if (updatedTaskIds.length > 0) {
+          await this.updateTaskMetrics();
+          await this.broadcastMetricsUpdate();
+        }
+      } catch (error) {
+        logger.error('Error in debounced metrics update', { error });
+      } finally {
+        this._metricsTimer = null;
+      }
+    }, this._metricsDebounceMs);
+  }
+
+  async computeTaskMetrics() {
+    const start = Date.now();
+    const rows = await Task.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]);
+    const base = { total: 0, pending: 0, in_progress: 0, completed: 0, blocked: 0, cancelled: 0 };
+    for (const r of rows) {
+      const key = String(r._id || '').toLowerCase();
+      if (Object.prototype.hasOwnProperty.call(base, key)) base[key] = r.count;
+      base.total += r.count;
+    }
+    const metrics = {
+      ...base,
+      completion_rate: base.total > 0 ? Math.round((base.completed / base.total) * 10000) / 100 : 0,
+      timestamp: new Date().toISOString(),
+    };
+    logger.debug(`Task metrics aggregation took ${Date.now() - start}ms`);
+    return metrics;
+  }
+
+  async updateTaskMetrics() {
+    try {
+      const m = await this.computeTaskMetrics();
+      getPrometheusService().updateTaskMetrics({
+        total: m.total,
+        pending: m.pending,
+        in_progress: m.in_progress,
+        completed: m.completed,
+        blocked: m.blocked,
+        cancelled: m.cancelled,
+      });
+    } catch (error) {
+      logger.error('Failed to update Prometheus task metrics', { error });
+    }
+  }
+
+  async broadcastMetricsUpdate() {
+    try {
+      const metrics = await this.computeTaskMetrics();
+      this.io.emit('metrics_update', { type: 'tasks', data: metrics });
+    } catch (error) {
+      logger.error('Error broadcasting metrics update', { error });
+    }
+  }
+
+  // ============ Socket Handlers ============
   setupSocketHandlers() {
     this.io.on('connection', (socket) => {
-      console.log(`🔌 Socket connected: ${socket.id}`);
+      logger.info(`Socket connected: ${socket.id}`);
 
-      // Handle authentication
       socket.on('authenticate', async (data) => {
         try {
-          await this.authenticateSocket(socket, data.token);
+          await this.authenticateSocket(socket, data?.token);
         } catch (error) {
-          console.error('❌ Socket authentication failed:', error);
+          logger.error('Socket authentication failed', { error });
           socket.emit('auth_error', { message: 'Authentication failed' });
-          socket.disconnect();
+          socket.disconnect(true);
         }
       });
 
-      // Handle task updates
       socket.on('task_update', async (data) => {
         try {
           await this.handleTaskUpdate(socket, data);
         } catch (error) {
-          console.error('❌ Error handling task update:', error);
+          logger.error('Error handling task update', { error });
           socket.emit('error', { message: 'Failed to update task' });
         }
       });
 
-      // Handle task status changes
       socket.on('task_status_change', async (data) => {
         try {
           await this.handleTaskStatusChange(socket, data);
         } catch (error) {
-          console.error('❌ Error handling task status change:', error);
+          logger.error('Error handling task status change', { error });
           socket.emit('error', { message: 'Failed to change task status' });
         }
       });
 
-      // Handle joining task rooms for real-time updates
-      socket.on('join_task', (taskId) => {
-        socket.join(`task_${taskId}`);
-        console.log(`👥 Socket ${socket.id} joined task room: task_${taskId}`);
-      });
-
-      // Handle leaving task rooms
-      socket.on('leave_task', (taskId) => {
-        socket.leave(`task_${taskId}`);
-        console.log(`👋 Socket ${socket.id} left task room: task_${taskId}`);
-      });
-
-      // Handle joining project rooms
-      socket.on('join_project', (projectName) => {
-        socket.join(`project_${projectName}`);
-        console.log(`👥 Socket ${socket.id} joined project room: project_${projectName}`);
-      });
-
-      // Handle notification acknowledgment
-      socket.on('notification_read', async (notificationIds) => {
+      socket.on('join_task', async (taskId) => {
         try {
-          const userId = this.userRooms.get(socket.id);
-          if (userId) {
-            await notificationService.markAsRead(userId, notificationIds);
-            socket.emit('notifications_marked_read', { notificationIds });
+          const uid = this.userRooms.get(socket.id);
+          const role = socket.userRole;
+          if (!uid || !taskId) return;
+
+          let authorized = false;
+          if (role === 'admin' || role === 'manager') {
+            authorized = true;
+          } else {
+            authorized = await Task.exists({
+              _id: taskId,
+              isActive: true,
+              $or: [
+                { assignedTo: uid },
+                { assignedBy: uid },
+              ],
+            });
+          }
+
+          if (authorized) {
+            socket.join(`task_${taskId}`);
+            logger.info(`Socket ${socket.id} joined task room: task_${taskId}`);
+          } else {
+            socket.emit('error', { code: 'FORBIDDEN', message: 'No access to this task' });
           }
         } catch (error) {
-          console.error('❌ Error marking notifications as read:', error);
+          logger.error('Error handling join_task', { error });
         }
       });
 
-      // Handle typing indicators for task comments with throttling
+      socket.on('leave_task', (taskId) => {
+        if (!taskId) return;
+        socket.leave(`task_${taskId}`);
+        logger.info(`Socket ${socket.id} left task room: task_${taskId}`);
+      });
+
+      socket.on('join_project', async (projectName) => {
+        try {
+          const uid = this.userRooms.get(socket.id);
+          const role = socket.userRole;
+          if (!uid || !projectName) return;
+
+          let authorized = false;
+          if (role === 'admin' || role === 'manager') {
+            authorized = true;
+          } else {
+            authorized = await Task.exists({
+              project: projectName,
+              isActive: true,
+              $or: [
+                { assignedTo: uid },
+                { assignedBy: uid },
+              ],
+            });
+          }
+
+          if (authorized) {
+            socket.join(`project_${projectName}`);
+            logger.info(`Socket ${socket.id} joined project room: project_${projectName}`);
+          } else {
+            socket.emit('error', { code: 'FORBIDDEN', message: 'No access to this project' });
+          }
+        } catch (error) {
+          logger.error('Error handling join_project', { error });
+        }
+      });
+
+      socket.on('notification_read', async (notificationIds) => {
+        try {
+          const userId = this.userRooms.get(socket.id);
+          if (!userId) return;
+          if (!Array.isArray(notificationIds) || notificationIds.length === 0) return;
+
+          await notificationService.markAsRead(userId, notificationIds);
+          socket.emit('notifications_marked_read', { notificationIds });
+        } catch (error) {
+          logger.error('Error marking notifications as read', { error });
+        }
+      });
+
       socket.on('typing_start', (data) => {
         const uid = this.userRooms.get(socket.id);
-        if (data.taskId && uid && this._canSendTyping(uid, data.taskId)) {
-          socket.to(`task_${data.taskId}`).emit('user_typing', {
-            userId: uid,
-            taskId: data.taskId,
-            typing: true,
-          });
+        if (data?.taskId && uid && this._canSendTyping(uid, data.taskId)) {
+          socket.to(`task_${data.taskId}`).emit('user_typing', { userId: uid, taskId: data.taskId, typing: true });
         }
       });
 
       socket.on('typing_stop', (data) => {
-        if (!data.taskId) return;
-        
-        const userId = this.userRooms.get(socket.id);
-        if (!userId) return;
-
-        // Typing stop events bypass throttle to ensure state consistency
-        socket.to(`task_${data.taskId}`).emit('user_typing', {
-          userId,
-          taskId: data.taskId,
-          typing: false,
-        });
+        const uid = this.userRooms.get(socket.id);
+        if (!data?.taskId || !uid) return;
+        // always allow stop event to ensure state consistency
+        socket.to(`task_${data.taskId}`).emit('user_typing', { userId: uid, taskId: data.taskId, typing: false });
       });
 
-      // Handle disconnect
       socket.on('disconnect', () => {
         this.handleDisconnect(socket);
       });
     });
   }
 
-  // Authenticate socket connection
+  // ============ Auth ============
   async authenticateSocket(socket, token) {
     const clientIP = this.getClientIP(socket);
 
     try {
-      // Check rate limiting first
       if (!this.checkAuthRateLimit(clientIP)) {
         logger.warn(`Authentication attempt blocked from ${clientIP} due to rate limiting`);
-        socket.emit('auth_error', {
-          code: 'TOO_MANY_AUTH_ATTEMPTS',
-          message: 'Too many authentication attempts. Please try again later.'
-        });
-        socket.disconnect();
+        socket.emit('auth_error', { code: 'TOO_MANY_AUTH_ATTEMPTS', message: 'Too many authentication attempts. Please try again later.' });
+        socket.disconnect(true);
         return;
       }
 
-      // Validate token presence
-      if (!token) {
-        throw new Error('NO_TOKEN');
-      }
+      if (!token) throw new Error('NO_TOKEN');
 
-      // Verify JWT token using centralized function
       const decoded = await verifyToken(token);
-      
-      // Support both userId and id for backward compatibility
       const userId = decoded.userId || decoded.id;
-      if (!userId) {
-        throw new Error('INVALID_TOKEN_PAYLOAD');
-      }
+      if (!userId) throw new Error('INVALID_TOKEN_PAYLOAD');
 
-      // Find and validate user
-      const user = await User.findById(decoded.userId)
-        .select('-password -loginAttempts -lockUntil')
-        .lean();
+      const user = await User.findById(userId).select('-password -loginAttempts -lockUntil').lean();
+      if (!user) throw new Error('USER_NOT_FOUND');
+      if (!user.isActive) throw new Error('ACCOUNT_DEACTIVATED');
+      if (process.env.NODE_ENV === 'production' && !user.isEmailVerified) throw new Error('EMAIL_NOT_VERIFIED');
 
-      if (!user) {
-        throw new Error('USER_NOT_FOUND');
-      }
-
-      if (!user.isActive) {
-        throw new Error('ACCOUNT_DEACTIVATED');
-      }
-
-      // In production, verify email
-      if (process.env.NODE_ENV === 'production' && !user.isEmailVerified) {
-        throw new Error('EMAIL_NOT_VERIFIED');
-      }
-
-      // Store user mapping with multi-socket support
+      // Map user and rooms
       this.addUserSocket(user._id.toString(), socket.id);
       this.userRooms.set(socket.id, user._id.toString());
-
-      // Join user-specific room for notifications
       socket.join(`user_${user._id}`);
 
-      // Store user data in socket
+      // Attach user info to socket
       socket.userId = user._id.toString();
       socket.userRole = user.role;
-      socket.userPermissions = user.permissions;
+      socket.userPermissions = Array.isArray(user.permissions) ? user.permissions : [];
 
-      // Schedule token expiration monitoring
+      // Token monitoring
       this.setupTokenMonitoring(user._id.toString(), token, decoded.exp * 1000);
 
-      // Record successful authentication
+      // Rate limit success
       this.recordAuthAttempt(clientIP, true);
 
       logger.info(`Socket authenticated: ${user.email} (${user.role}) - Socket: ${socket.id} IP: ${clientIP}`);
 
-      // Send authentication success
       socket.emit('authenticated', {
         userId: user._id,
         role: user.role,
-        permissions: user.permissions,
-        expiresAt: decoded.exp * 1000
+        permissions: socket.userPermissions,
+        expiresAt: decoded.exp * 1000,
       });
 
-      // Send any pending notifications
       await this.sendPendingNotifications(socket, user._id);
-
     } catch (error) {
-      // Record failed authentication attempt
       this.recordAuthAttempt(clientIP, false);
 
-      const errorResponse = {
-        code: error.message || 'AUTHENTICATION_FAILED',
-        message: 'Authentication failed'
-      };
-
-      // Map specific errors to user-friendly messages
+      const errorResponse = { code: error.message || 'AUTHENTICATION_FAILED', message: 'Authentication failed' };
       switch (error.message) {
         case 'NO_TOKEN':
           errorResponse.message = 'No authentication token provided';
           break;
         case 'INVALID_TOKEN':
           errorResponse.message = 'Invalid authentication token';
+          break;
+        case 'INVALID_TOKEN_PAYLOAD':
+          errorResponse.message = 'Invalid authentication token payload';
           break;
         case 'USER_NOT_FOUND':
           errorResponse.message = 'User not found';
@@ -633,73 +601,46 @@ class TaskSocketHandler {
       }
 
       logger.warn(`Socket authentication failed from ${clientIP}: ${errorResponse.code}`);
-      
       socket.emit('auth_error', errorResponse);
-      socket.disconnect();
+      socket.disconnect(true);
     }
   }
 
-  // Handle task updates
+  // ============ Business events ============
   async handleTaskUpdate(socket, data) {
     const { userId } = socket;
-    if (!userId) {
-      throw new Error('Socket not authenticated');
-    }
+    if (!userId) throw new Error('Socket not authenticated');
 
-    // Broadcast task update to all users in task room
-    if (data.taskId) {
-      this.io.to(`task_${data.taskId}`).emit('task_updated', {
-        taskId: data.taskId,
-        updatedBy: userId,
-        changes: data.changes,
-        timestamp: new Date(),
-      });
+    if (data?.taskId) {
+      const payload = { taskId: data.taskId, updatedBy: userId, changes: data.changes, timestamp: new Date() };
+      this.io.to(`task_${data.taskId}`).emit('task_updated', payload);
 
-      // Also broadcast to project room
       if (data.projectName) {
-        this.io.to(`project_${data.projectName}`).emit('project_task_updated', {
-          taskId: data.taskId,
-          projectName: data.projectName,
-          updatedBy: userId,
-          changes: data.changes,
-          timestamp: new Date(),
-        });
+        this.io.to(`project_${data.projectName}`).emit('project_task_updated', { ...payload, projectName: data.projectName });
       }
     }
   }
 
-  // Handle task status changes with throttling and debounced metrics
   async handleTaskStatusChange(socket, data) {
     const { userId } = socket;
-    if (!userId) {
-      throw new Error('Socket not authenticated');
-    }
+    if (!userId) throw new Error('Socket not authenticated');
 
-    // Broadcast status change to all relevant users
-    if (data.taskId && this.throttleTaskUpdate(data.taskId)) {
+    if (data?.taskId && this.throttleTaskUpdate(data.taskId)) {
       const timestamp = new Date();
-
-      this.io.to(`task_${data.taskId}`).emit('task_status_changed', {
+      const statusPayload = {
         taskId: data.taskId,
         oldStatus: data.oldStatus,
         newStatus: data.newStatus,
         changedBy: userId,
         timestamp,
-      });
+      };
 
-      // Broadcast to project room
+      this.io.to(`task_${data.taskId}`).emit('task_status_changed', statusPayload);
+
       if (data.projectName) {
-        this.io.to(`project_${data.projectName}`).emit('project_task_status_changed', {
-          taskId: data.taskId,
-          projectName: data.projectName,
-          oldStatus: data.oldStatus,
-          newStatus: data.newStatus,
-          changedBy: userId,
-          timestamp,
-        });
+        this.io.to(`project_${data.projectName}`).emit('project_task_status_changed', { ...statusPayload, projectName: data.projectName });
       }
 
-      // Send dashboard update to all managers and admins
       await this.broadcastDashboardUpdate(data.taskId, data.newStatus, userId);
 
       // Queue metrics update for debounced processing
@@ -708,32 +649,22 @@ class TaskSocketHandler {
     }
   }
 
-  // Send pending notifications to newly connected user
   async sendPendingNotifications(socket, userId) {
     try {
-      const notifications = await notificationService.getNotificationsForUser(userId, {
-        limit: 10,
-        unreadOnly: true,
-      });
-
-      if (notifications.notifications.length > 0) {
-        socket.emit('pending_notifications', {
-          notifications: notifications.notifications,
-          unreadCount: notifications.unreadCount,
-        });
+      const result = await notificationService.getNotificationsForUser(userId, { limit: 10, unreadOnly: true });
+      if (result && Array.isArray(result.notifications) && result.notifications.length > 0) {
+        socket.emit('pending_notifications', { notifications: result.notifications, unreadCount: result.unreadCount || 0 });
       }
     } catch (error) {
-      console.error('❌ Error sending pending notifications:', error);
+      logger.error('Error sending pending notifications', { error });
     }
   }
 
-  // Broadcast dashboard update to managers and admins using cached data
   async broadcastDashboardUpdate(taskId, newStatus, changedBy) {
     try {
       const startTime = Date.now();
       const adminManagerSockets = await this.getAdminManagerSockets();
 
-      // Prepare update payload once
       const dashboardUpdate = {
         type: 'task_status_change',
         taskId,
@@ -742,11 +673,9 @@ class TaskSocketHandler {
         timestamp: new Date(),
       };
 
-      // Track broadcast stats
       let totalDeliveries = 0;
       let targetUsers = 0;
 
-      // Broadcast to all cached admin/manager sockets
       for (const [userId, userData] of adminManagerSockets) {
         const sentCount = this.emitToUserSockets(userId, 'dashboard_update', dashboardUpdate);
         if (sentCount > 0) {
@@ -756,179 +685,65 @@ class TaskSocketHandler {
       }
 
       const duration = Date.now() - startTime;
-      console.log(`📊 Dashboard update broadcast complete:
-        - Duration: ${duration}ms
-        - Target Users: ${targetUsers}
-        - Total Deliveries: ${totalDeliveries}
-      `);
+      logger.info(`Dashboard update broadcast complete: duration=${duration}ms targetUsers=${targetUsers} totalDeliveries=${totalDeliveries}`);
 
-      // Broadcast real-time metrics update to all connected users
-      this.broadcastMetricsUpdate();
+      // Do NOT trigger metrics here (handled by debounced pipeline)
     } catch (error) {
-      console.error('❌ Error broadcasting dashboard update:', error);
+      logger.error('Error broadcasting dashboard update', { error });
     }
   }
 
-  // Compute task metrics using aggregation
-  // Get aggregated task stats
-  async getAggregatedTaskStats() {
-    const stats = await Task.aggregate([
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-    
-    return stats.reduce((acc, curr) => {
-      acc[curr._id.toLowerCase()] = curr.count;
-      return acc;
-    }, { total: 0, pending: 0, in_progress: 0, completed: 0, blocked: 0 });
-  }
-
-  // Debounced metrics update
-  debouncedMetricsUpdate() {
-    if (this._metricsTimer) {
-      clearTimeout(this._metricsTimer);
-    }
-    
-    this._metricsTimer = setTimeout(async () => {
-      try {
-        const updatedTaskIds = Array.from(this.metricsUpdateQueue);
-        this.metricsUpdateQueue.clear();
-        
-        if (updatedTaskIds.length > 0) {
-          await this.updateTaskMetrics();
-          await this.broadcastMetricsUpdate();
-        }
-      } catch (error) {
-        logger.error('Error in debounced metrics update:', error);
-      }
-    }, this._metricsDebounceMs);
-  }
-
-  async computeTaskMetrics() {
-    const start = Date.now();
-    const agg = await Task.aggregate([
-      { $group: { _id: '$status', count: { $sum: 1 } } },
-      { $group: { _id: null, byStatus: { $push: { k: '$_id', v: '$count' } }, total: { $sum: '$count' } } },
-      { $project: { _id: 0, byStatus: { $arrayToObject: '$byStatus' }, total: 1 } }
-    ]);
-    const res = agg[0] || { byStatus: {}, total: 0 };
-    const m = {
-      total: res.total || 0,
-      pending: res.byStatus?.pending || 0,
-      in_progress: res.byStatus?.in_progress || 0,
-      completed: res.byStatus?.completed || 0,
-      blocked: res.byStatus?.blocked || 0,
-    };
-    m.completion_rate = m.total > 0 ? Math.round((m.completed / m.total) * 10000) / 100 : 0;
-    m.timestamp = new Date().toISOString();
-    console.log(`metrics aggregation took ${Date.now()-start}ms`);
-    return m;
-  }
-
-  // Update task metrics in Prometheus
-  async updateTaskMetrics() {
-    const m = await this.computeTaskMetrics();
-    getPrometheusService().updateTaskMetrics({
-      total: m.total,
-      pending: m.pending,
-      in_progress: m.in_progress,
-      completed: m.completed,
-      blocked: m.blocked
-    });
-  }
-
-  // Broadcast real-time metrics to all connected users
-  async broadcastMetricsUpdate() {
-    try {
-      const startTime = Date.now();
-      const stats = await this.getAggregatedTaskStats();
-
-      const taskMetrics = {
-        ...stats,
-        completion_rate: stats.total > 0 ? Math.round((stats.completed / stats.total) * 100 * 100) / 100 : 0,
-        timestamp: new Date().toISOString(),
-      };
-
-      // Broadcast to all connected users
-      this.io.emit('metrics_update', {
-        type: 'tasks',
-        data: taskMetrics,
-      });
-    } catch (error) {
-      console.error('Error broadcasting metrics update:', error);
-    }
-  }
-
-  // Broadcast activity feed update
   broadcastActivityUpdate(activity) {
-    this.io.emit('activity_update', {
-      type: 'new_activity',
-      data: activity,
-      timestamp: new Date().toISOString(),
-    });
+    this.io.emit('activity_update', { type: 'new_activity', data: activity, timestamp: new Date().toISOString() });
   }
 
-  // Handle socket disconnect with multi-socket support
+  // ============ Disconnect ============
   handleDisconnect(socket) {
     const userId = this.userRooms.get(socket.id);
 
     if (userId) {
       this.removeUserSocket(userId, socket.id);
       this.userRooms.delete(socket.id);
-      
+
       const remainingSockets = this.getUserSockets(userId).size;
-      console.log(`👋 Socket disconnected: ${socket.id} (user: ${userId}, remaining connections: ${remainingSockets})`);
-      
-      // Clean up token monitoring if no more active sockets
+      logger.info(`Socket disconnected: ${socket.id} (user: ${userId}, remaining connections: ${remainingSockets})`);
+
       if (remainingSockets === 0) {
+        const monitoring = this.tokenMonitoring.get(userId);
+        if (monitoring?.warningTimeoutId) clearTimeout(monitoring.warningTimeoutId);
         this.tokenMonitoring.delete(userId);
         logger.info(`Token monitoring cleaned up for user ${userId} - no active connections`);
       }
-      
-      // Run cleanup after disconnect to ensure consistency
+
       this.cleanupStaleConnections();
     } else {
-      console.log(`👋 Socket disconnected: ${socket.id}`);
+      logger.info(`Socket disconnected: ${socket.id}`);
+      this.socketConnectedAt.delete(socket.id);
     }
   }
 
-  // Broadcast notification to specific user across all their devices
+  // ============ Broadcast helpers ============
   broadcastNotificationToUser(userId, notification) {
-    // First, try room-based broadcast for efficiency
     this.io.to(`user_${userId}`).emit('notification', notification);
-    
-    // Then validate and prune any stale sockets while tracking delivery
     const sentCount = this.emitToUserSockets(userId.toString(), 'notification', notification);
-
     if (sentCount > 0) {
-      console.log(`📡 Notification broadcasted to user ${userId} on ${sentCount} device(s)`);
+      logger.info(`Notification broadcasted to user ${userId} on ${sentCount} device(s)`);
       return true;
     }
     return false;
   }
 
-  // Broadcast task assignment to user across all their devices
   broadcastTaskAssignment(userId, taskData) {
-    // First, try room-based broadcast for efficiency
     this.io.to(`user_${userId}`).emit('task_assigned', taskData);
-    
-    // Then validate and prune any stale sockets while tracking delivery
     const sentCount = this.emitToUserSockets(userId.toString(), 'task_assigned', taskData);
-
     if (sentCount > 0) {
-      console.log(`📋 Task assignment broadcasted to user ${userId} on ${sentCount} device(s)`);
+      logger.info(`Task assignment broadcasted to user ${userId} on ${sentCount} device(s)`);
       return true;
     }
     return false;
   }
 
-  // Broadcast task completion to relevant users
   broadcastTaskCompletion(taskData, assignedBy, managers = []) {
-    // Notify the person who assigned the task
     if (assignedBy) {
       this.broadcastNotificationToUser(assignedBy, {
         type: 'task_completed',
@@ -939,7 +754,6 @@ class TaskSocketHandler {
       });
     }
 
-    // Notify managers
     for (const manager of managers) {
       this.broadcastNotificationToUser(manager._id, {
         type: 'task_completed',
@@ -950,37 +764,29 @@ class TaskSocketHandler {
       });
     }
 
-    // Broadcast to task room
-    this.io.to(`task_${taskData._id}`).emit('task_completed', {
-      taskId: taskData._id,
-      title: taskData.title,
-      completedAt: new Date(),
-    });
+    this.io.to(`task_${taskData._id}`).emit('task_completed', { taskId: taskData._id, title: taskData.title, completedAt: new Date() });
   }
 
-  // Get connected users count with optional by parameter
   getConnectedUsersCount({ by = 'users' } = {}) {
     if (by === 'sockets') {
       let totalSockets = 0;
-      for (const sockets of this.connectedUsers.values()) {
-        totalSockets += sockets.size;
-      }
+      for (const sockets of this.connectedUsers.values()) totalSockets += sockets.size;
       return totalSockets;
     }
-    return this.connectedUsers.size; // return unique users count
+    return this.connectedUsers.size;
   }
 
-  // Get connected users list with device count (for admin)
   getConnectedUsersList() {
-    return Array.from(this.connectedUsers.entries()).map(([userId, sockets]) => ({
-      userId,
-      deviceCount: sockets.size,
-      socketIds: Array.from(sockets),
-      connectedAt: new Date(), // You might want to track this properly
-    }));
+    return Array.from(this.connectedUsers.entries()).map(([userId, sockets]) => {
+      let earliest = Date.now();
+      for (const sid of sockets) {
+        const t = this.socketConnectedAt.get(sid) || Date.now();
+        if (t < earliest) earliest = t;
+      }
+      return { userId, deviceCount: sockets.size, socketIds: Array.from(sockets), connectedAt: new Date(earliest) };
+    });
   }
 
-  // Send system-wide announcement
   broadcastSystemAnnouncement(announcement) {
     this.io.emit('system_announcement', {
       title: announcement.title,
@@ -988,12 +794,42 @@ class TaskSocketHandler {
       type: announcement.type || 'info',
       timestamp: new Date(),
     });
-    console.log(`📢 System announcement broadcasted: ${announcement.title}`);
+    logger.info(`System announcement broadcasted: ${announcement.title}`);
   }
 
-  // Cleanup method to be called on server shutdown or hot reload
+  cleanupStaleConnections() {
+    logger.debug('Running stale connection cleanup...');
+    for (const [userId, sockets] of this.connectedUsers.entries()) {
+      const validSockets = new Set();
+      for (const socketId of sockets) {
+        if (this.io.sockets.sockets.has(socketId)) {
+          validSockets.add(socketId);
+        } else {
+          this.userRooms.delete(socketId);
+          this.socketConnectedAt.delete(socketId);
+          logger.debug(`Removed stale socket ${socketId} for user ${userId}`);
+        }
+      }
+      if (validSockets.size === 0) {
+        this.connectedUsers.delete(userId);
+        logger.debug(`Removed user ${userId} with no valid sockets`);
+      } else if (validSockets.size !== sockets.size) {
+        this.connectedUsers.set(userId, validSockets);
+        logger.debug(`Updated socket set for user ${userId}: ${validSockets.size} valid sockets`);
+      }
+    }
+
+    // Cleanup old task throttles (keep only entries updated within last 10 minutes)
+    const now = Date.now();
+    for (const [taskId, ts] of this.taskUpdateThrottlers.entries()) {
+      if (now - ts > 10 * 60 * 1000) this.taskUpdateThrottlers.delete(taskId);
+    }
+
+    // Clear outdated auth attempts
+    this.cleanupAuthAttempts();
+  }
+
   destroy() {
-    // Clear all intervals
     if (this._staleCleanupInterval) {
       clearInterval(this._staleCleanupInterval);
       this._staleCleanupInterval = null;
@@ -1003,19 +839,25 @@ class TaskSocketHandler {
       this.tokenCheckInterval = null;
     }
 
-    // Clear all maps
-    this.connectedUsers.clear();
-    this.userRooms.clear();
-    this.tokenMonitoring.clear();
-    this.authAttempts.clear();
+    for (const [, entry] of this.tokenMonitoring.entries()) {
+      if (entry.warningTimeoutId) clearTimeout(entry.warningTimeoutId);
+    }
 
-    // Clear all debounce timers
     if (this._metricsTimer) {
       clearTimeout(this._metricsTimer);
       this._metricsTimer = null;
     }
-    this._typingThrottle.forEach(timerId => clearTimeout(timerId));
-    this._typingThrottle.clear();
+
+    this._typingThrottle.forEach((timerId) => clearTimeout(timerId));
+
+    this.connectedUsers.clear();
+    this.userRooms.clear();
+    this.socketConnectedAt.clear();
+    this.tokenMonitoring.clear();
+    this.authAttempts.clear();
+    this.adminManagerCache.clear();
+
+    logger.info('TaskSocketHandler destroyed and cleaned up');
   }
 }
 

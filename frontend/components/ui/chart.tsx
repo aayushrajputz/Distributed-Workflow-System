@@ -4,6 +4,8 @@ import * as React from "react"
 import * as RechartsPrimitive from "recharts"
 
 import { cn } from "@/lib/utils"
+import { sanitizeCSS } from "@/lib/security"
+import { useNonce } from "@/contexts/nonce-context"
 
 // Format: { THEME_NAME: CSS_SELECTOR }
 const THEMES = { light: "", dark: ".dark" } as const
@@ -48,6 +50,7 @@ function ChartContainer({
 }) {
   const uniqueId = React.useId()
   const chartId = `chart-${id || uniqueId.replace(/:/g, "")}`
+  const nonce = useNonce()
 
   return (
     <ChartContext.Provider value={{ config }}>
@@ -60,7 +63,7 @@ function ChartContainer({
         )}
         {...props}
       >
-        <ChartStyle id={chartId} config={config} />
+        <ChartStyle id={chartId} config={config} nonce={nonce} />
         <RechartsPrimitive.ResponsiveContainer>
           {children}
         </RechartsPrimitive.ResponsiveContainer>
@@ -69,7 +72,15 @@ function ChartContainer({
   )
 }
 
-const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
+const ChartStyle = ({ 
+  id, 
+  config, 
+  nonce 
+}: { 
+  id: string; 
+  config: ChartConfig;
+  nonce?: string;
+}) => {
   const colorConfig = Object.entries(config).filter(
     ([, config]) => config.theme || config.color
   )
@@ -77,12 +88,6 @@ const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
   if (!colorConfig.length) {
     return null
   }
-
-  // Sanitize the CSS content to prevent XSS
-  const sanitizeCSS = (css: string): string => {
-    // Remove any potentially dangerous characters
-    return css.replace(/[<>]/g, '');
-  };
 
   const cssContent = Object.entries(THEMES)
     .map(
@@ -103,6 +108,7 @@ ${colorConfig
 
   return (
     <style
+      nonce={nonce}
       dangerouslySetInnerHTML={{
         __html: sanitizeCSS(cssContent),
       }}
