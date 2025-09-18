@@ -8,6 +8,21 @@ class WorkflowEngine {
   constructor() {
     this.rules = new Map();
     this.scheduledJobs = new Map();
+    this.isStarted = false;
+    this.metrics = {
+      rulesExecuted: 0,
+      rulesSucceeded: 0,
+      rulesFailed: 0,
+      averageExecutionTime: 0,
+      lastExecutionTime: null,
+    };
+    this.config = {
+      overdueCheckInterval: parseInt(process.env.WORKFLOW_OVERDUE_INTERVAL) || 5 * 60 * 1000,
+      escalationCheckInterval: parseInt(process.env.WORKFLOW_ESCALATION_INTERVAL) || 15 * 60 * 1000,
+      dailyDigestInterval: parseInt(process.env.WORKFLOW_DIGEST_INTERVAL) || 24 * 60 * 60 * 1000,
+      maxRetries: parseInt(process.env.WORKFLOW_MAX_RETRIES) || 3,
+      retryDelay: parseInt(process.env.WORKFLOW_RETRY_DELAY) || 5000,
+    };
     this.initializeDefaultRules();
   }
 
@@ -472,27 +487,350 @@ class WorkflowEngine {
     }
   }
 
-  // Start the workflow engine
-  start() {
-    console.log('🚀 Workflow Engine started');
+  // Enhanced rule execution with metrics and error handling
+  async executeRuleWithMetrics(name, rule, ...args) {
+    const startTime = Date.now();
+    this.metrics.rulesExecuted++;
 
-    // Start all scheduled rules
-    for (const [name, rule] of this.rules) {
-      if (rule.trigger === 'schedule' && rule.interval) {
-        this.scheduleRule(name, rule);
+    try {
+      const result = await rule.action(...args);
+      
+      const executionTime = Date.now() - startTime;
+      this.updateExecutionMetrics(executionTime, true);
+      
+      console.log(`✅ Rule '${name}' executed successfully in ${executionTime}ms`);
+      
+      // Update Prometheus metrics if available
+      try {
+        const prometheusService = require('./prometheusService');
+        if (prometheusService && prometheusService.getPrometheusService) {
+          prometheusService.getPrometheusService().recordWorkflowRuleExecution(name, executionTime, 'success');
+        }
+      } catch (prometheusError) {
+        // Prometheus service not available, continue silently
       }
+      
+      return result;
+    } catch (error) {
+      const executionTime = Date.now() - startTime;
+      this.updateExecutionMetrics(executionTime, false);
+      
+      console.error(`❌ Rule '${name}' failed after ${executionTime}ms:`, error);
+      
+      // Update Prometheus metrics if available
+      try {
+        const prometheusService = require('./prometheusService');
+        if (prometheusService && prometheusService.getPrometheusService) {
+          prometheusService.getPrometheusService().recordWorkflowRuleExecution(name, executionTime, 'error');
+        }
+      } catch (prometheusError) {
+        // Prometheus service not available, continue silently
+      }
+      
+      // Implement retry logic for critical rules
+      if (this.isCriticalRule(name) && this.shouldRetry(name, error)) {
+        console.log(`🔄 Retrying critical rule '${name}' after ${this.config.retryDelay}ms`);
+        setTimeout(() => {
+          this.executeRuleWithMetrics(name, rule, ...args);
+        }, this.config.retryDelay);
+      }
+      
+      throw error;
     }
   }
 
-  // Stop the workflow engine
+  // Update execution metrics
+  updateExecutionMetrics(executionTime, success) {
+    if (success) {
+      this.metrics.rulesSucceeded++;
+    } else {
+      this.metrics.rulesFailed++;
+    }
+    
+    // Update average execution time
+    const totalExecutions = this.metrics.rulesSucceeded + this.metrics.rulesFailed;
+    this.metrics.averageExecutionTime = 
+      ((this.metrics.averageExecutionTime * (totalExecutions - 1)) + executionTime) / totalExecutions;
+    
+    this.metrics.lastExecutionTime = new Date();
+  }
+
+  // Check if a rule is critical and should be retried
+  isCriticalRule(ruleName) {
+    const criticalRules = ['task_overdue_check', 'task_escalation', 'task_assigned'];
+    return criticalRules.includes(ruleName);
+  }
+
+  // Determine if a rule should be retried based on error type
+  shouldRetry(ruleName, error) {
+    // Don't retry validation errors or user-related errors
+    if (error.name === 'ValidationError' || error.name === 'CastError') {
+      return false;
+    }
+    
+    // Retry network errors, database connection issues, etc.
+    const retryableErrors = ['MongoNetworkError', 'MongoTimeoutError', 'ECONNRESET', 'ETIMEDOUT'];
+    return retryableErrors.some(errorType => 
+      error.name === errorType || error.code === errorType || error.message.includes(errorType)
+    );
+  }
+
+  // Enhanced schedule rule with better error handling
+  scheduleRule(name, rule) {
+    if (this.scheduledJobs.has(name)) {
+      clearInterval(this.scheduledJobs.get(name));
+    }
+
+    const intervalId = setInterval(async () => {
+      try {
+        if (await rule.condition()) {
+          console.log(`🔄 Executing scheduled workflow rule: ${name}`);
+          await this.executeRuleWithMetrics(name, rule);
+        }
+      } catch (error) {
+        console.error(`❌ Error executing scheduled workflow rule ${name}:`, error);
+        
+        // Log detailed error information
+        this.logRuleError(name, error, 'scheduled');
+      }
+    }, rule.interval);
+
+    this.scheduledJobs.set(name, intervalId);
+    console.log(`📅 Scheduled rule '${name}' with interval ${rule.interval}ms`);
+  }
+
+  // Enhanced event rule execution with better error handling
+  async executeEventRules(eventType, data, oldData = null) {
+    const eventStartTime = Date.now();
+    const executedRules = [];
+    const failedRules = [];
+
+    for (const [name, rule] of this.rules) {
+      if (rule.trigger === 'event') {
+        try {
+          if (await rule.condition(data, oldData)) {
+            console.log(`🚀 Executing event rule: ${name} for ${eventType}`);
+            await this.executeRuleWithMetrics(name, rule, data, oldData);
+            executedRules.push(name);
+          }
+        } catch (error) {
+          console.error(`❌ Error executing event rule ${name}:`, error);
+          failedRules.push({ name, error: error.message });
+          
+          // Log detailed error information
+          this.logRuleError(name, error, 'event', { eventType, data: this.sanitizeDataForLogging(data) });
+        }
+      }
+    }
+
+    const totalTime = Date.now() - eventStartTime;
+    console.log(`📊 Event '${eventType}' processing completed in ${totalTime}ms. Executed: ${executedRules.length}, Failed: ${failedRules.length}`);
+
+    return {
+      eventType,
+      executedRules,
+      failedRules,
+      totalExecutionTime: totalTime,
+    };
+  }
+
+  // Log rule errors with context
+  logRuleError(ruleName, error, triggerType, context = {}) {
+    const errorLog = {
+      timestamp: new Date().toISOString(),
+      ruleName,
+      triggerType,
+      error: {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+        code: error.code,
+      },
+      context,
+      metrics: this.getMetrics(),
+    };
+
+    console.error('🚨 Workflow Engine Error:', JSON.stringify(errorLog, null, 2));
+    
+    // In production, you might want to send this to a logging service
+    if (process.env.NODE_ENV === 'production') {
+      // Example: Send to external logging service
+      // await this.sendToLoggingService(errorLog);
+    }
+  }
+
+  // Sanitize data for logging (remove sensitive information)
+  sanitizeDataForLogging(data) {
+    if (!data || typeof data !== 'object') return data;
+    
+    const sanitized = { ...data };
+    const sensitiveFields = ['password', 'token', 'secret', 'key', 'auth'];
+    
+    for (const field of sensitiveFields) {
+      if (sanitized[field]) {
+        sanitized[field] = '[REDACTED]';
+      }
+    }
+    
+    return sanitized;
+  }
+
+  // Get current metrics
+  getMetrics() {
+    return {
+      ...this.metrics,
+      isStarted: this.isStarted,
+      activeRules: this.rules.size,
+      scheduledJobs: this.scheduledJobs.size,
+      uptime: this.isStarted ? Date.now() - this.startTime : 0,
+    };
+  }
+
+  // Validate engine state
+  validateEngineState() {
+    const issues = [];
+    
+    if (!this.isStarted) {
+      issues.push('Engine is not started');
+    }
+    
+    if (this.rules.size === 0) {
+      issues.push('No rules configured');
+    }
+    
+    const scheduledRulesCount = Array.from(this.rules.values()).filter(rule => rule.trigger === 'schedule').length;
+    if (scheduledRulesCount !== this.scheduledJobs.size) {
+      issues.push(`Scheduled rules mismatch: ${scheduledRulesCount} rules vs ${this.scheduledJobs.size} jobs`);
+    }
+    
+    return {
+      isValid: issues.length === 0,
+      issues,
+      metrics: this.getMetrics(),
+    };
+  }
+
+  // Graceful restart with state preservation
+  async restart() {
+    console.log('🔄 Restarting Workflow Engine...');
+    
+    const currentMetrics = { ...this.metrics };
+    
+    this.stop();
+    
+    // Wait a moment for cleanup
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Preserve metrics across restart
+    this.metrics = currentMetrics;
+    
+    this.start();
+    
+    console.log('✅ Workflow Engine restarted successfully');
+  }
+
+  // Health check endpoint data
+  getHealthStatus() {
+    const validation = this.validateEngineState();
+    const metrics = this.getMetrics();
+    
+    return {
+      status: validation.isValid ? 'healthy' : 'unhealthy',
+      timestamp: new Date().toISOString(),
+      uptime: metrics.uptime,
+      metrics: {
+        rulesExecuted: metrics.rulesExecuted,
+        successRate: metrics.rulesExecuted > 0 ? 
+          ((metrics.rulesSucceeded / metrics.rulesExecuted) * 100).toFixed(2) + '%' : '0%',
+        averageExecutionTime: Math.round(metrics.averageExecutionTime) + 'ms',
+        lastExecutionTime: metrics.lastExecutionTime,
+      },
+      configuration: {
+        totalRules: metrics.activeRules,
+        scheduledJobs: metrics.scheduledJobs,
+        intervals: {
+          overdueCheck: this.config.overdueCheckInterval,
+          escalationCheck: this.config.escalationCheckInterval,
+          dailyDigest: this.config.dailyDigestInterval,
+        },
+      },
+      issues: validation.issues,
+    };
+  }
+
+  // Start the workflow engine with enhanced initialization
+  start() {
+    if (this.isStarted) {
+      console.warn('⚠️ Workflow Engine is already started');
+      return;
+    }
+
+    console.log('🚀 Starting Workflow Engine...');
+    this.startTime = Date.now();
+    this.isStarted = true;
+
+    // Validate configuration
+    const validation = this.validateEngineState();
+    if (!validation.isValid) {
+      console.warn('⚠️ Engine validation issues:', validation.issues);
+    }
+
+    // Start all scheduled rules with enhanced error handling
+    let scheduledCount = 0;
+    for (const [name, rule] of this.rules) {
+      if (rule.trigger === 'schedule' && rule.interval) {
+        try {
+          this.scheduleRule(name, rule);
+          scheduledCount++;
+        } catch (error) {
+          console.error(`❌ Failed to schedule rule '${name}':`, error);
+        }
+      }
+    }
+
+    console.log(`✅ Workflow Engine started successfully with ${scheduledCount} scheduled rules`);
+    
+    // Set up periodic health checks in development
+    if (process.env.NODE_ENV === 'development') {
+      this.healthCheckInterval = setInterval(() => {
+        const health = this.getHealthStatus();
+        if (health.status === 'unhealthy') {
+          console.warn('⚠️ Workflow Engine health check failed:', health.issues);
+        }
+      }, 5 * 60 * 1000); // Every 5 minutes
+    }
+  }
+
+  // Stop the workflow engine with enhanced cleanup
   stop() {
-    console.log('⏹️ Workflow Engine stopped');
+    if (!this.isStarted) {
+      console.warn('⚠️ Workflow Engine is already stopped');
+      return;
+    }
+
+    console.log('⏹️ Stopping Workflow Engine...');
 
     // Clear all scheduled jobs
+    let clearedCount = 0;
     for (const [name, intervalId] of this.scheduledJobs) {
-      clearInterval(intervalId);
+      try {
+        clearInterval(intervalId);
+        clearedCount++;
+      } catch (error) {
+        console.error(`❌ Error clearing interval for rule '${name}':`, error);
+      }
     }
     this.scheduledJobs.clear();
+
+    // Clear health check interval
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
+
+    this.isStarted = false;
+    
+    console.log(`✅ Workflow Engine stopped successfully. Cleared ${clearedCount} scheduled jobs.`);
   }
 }
 

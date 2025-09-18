@@ -1,5 +1,5 @@
 import { renderHook, waitFor } from '@testing-library/react';
-import { useWorkflows } from 'hooks/use-workflows';
+import { useWorkflows, useCreateWorkflow, useUpdateWorkflow, useDeleteWorkflow } from 'hooks/use-workflows';
 import { api } from 'lib/api';
 import { wrapper } from '../utils/test-utils';
 
@@ -7,66 +7,121 @@ import { wrapper } from '../utils/test-utils';
 
 describe('useWorkflows', () => {
   const mockWorkflows = [
-    { id: '1', name: 'Workflow 1' },
-    { id: '2', name: 'Workflow 2' },
+    { id: '1', name: 'Workflow 1', description: 'Test workflow 1' },
+    { id: '2', name: 'Workflow 2', description: 'Test workflow 2' },
   ];
 
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it('fetches workflows', async () => {
-    (api.getWorkflows as jest.Mock).mockResolvedValueOnce(mockWorkflows);
+  describe('useWorkflows hook', () => {
+    it('fetches workflows successfully', async () => {
+      (api.getWorkflows as jest.Mock).mockResolvedValueOnce({ data: mockWorkflows });
 
-    const { result } = renderHook(() => useWorkflows(), { wrapper });
+      const { result } = renderHook(() => useWorkflows(), { wrapper });
 
-    await waitFor(() => {
-      expect(result.current.data).toEqual(mockWorkflows);
+      expect(result.current.isLoading).toBe(true);
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+        expect(result.current.data).toEqual(mockWorkflows);
+        expect(result.current.error).toBe(null);
+      });
+
+      expect(api.getWorkflows).toHaveBeenCalled();
     });
 
-    expect(api.getWorkflows).toHaveBeenCalled();
-  });
+    it('handles error state', async () => {
+      const error = new Error('Failed to fetch workflows');
+      (api.getWorkflows as jest.Mock).mockRejectedValueOnce(error);
 
-  it('handles error state', async () => {
-    const error = new Error('Failed to fetch workflows');
-    (api.getWorkflows as jest.Mock).mockRejectedValueOnce(error);
+      const { result } = renderHook(() => useWorkflows(), { wrapper });
 
-    const { result } = renderHook(() => useWorkflows(), { wrapper });
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+        expect(result.current.error).toBeTruthy();
+        expect(result.current.data).toBeUndefined();
+      });
 
-    await waitFor(() => {
-      expect(result.current.error).toBeTruthy();
+      expect(api.getWorkflows).toHaveBeenCalled();
     });
   });
 
-  it('creates new workflow', async () => {
-    const newWorkflow = { name: 'New Workflow' };
-    (api.createWorkflow as jest.Mock).mockResolvedValueOnce(newWorkflow);
+  describe('useCreateWorkflow hook', () => {
+    it('creates new workflow', async () => {
+      const newWorkflow = { name: 'New Workflow', description: 'New test workflow' };
+      const createdWorkflow = { id: '3', ...newWorkflow };
+      (api.createWorkflow as jest.Mock).mockResolvedValueOnce({ data: createdWorkflow });
 
-    const { result } = renderHook(() => useWorkflows(), { wrapper });
+      const { result } = renderHook(() => useCreateWorkflow(), { wrapper });
 
-    await result.current.mutateAsync(newWorkflow);
+      expect(result.current.isPending).toBe(false);
 
-    expect(api.createWorkflow).toHaveBeenCalledWith(newWorkflow);
+      await result.current.mutateAsync(newWorkflow);
+
+      expect(api.createWorkflow).toHaveBeenCalledWith(newWorkflow);
+    });
+
+    it('handles create workflow error', async () => {
+      const error = new Error('Failed to create workflow');
+      (api.createWorkflow as jest.Mock).mockRejectedValueOnce(error);
+
+      const { result } = renderHook(() => useCreateWorkflow(), { wrapper });
+
+      try {
+        await result.current.mutateAsync({ name: 'Test' });
+      } catch (e) {
+        expect(e).toBe(error);
+      }
+
+      expect(api.createWorkflow).toHaveBeenCalled();
+    });
   });
 
-  it('updates existing workflow', async () => {
-    const updatedWorkflow = { id: '1', name: 'Updated Workflow' };
-    (api.updateWorkflow as jest.Mock).mockResolvedValueOnce(updatedWorkflow);
+  describe('useUpdateWorkflow hook', () => {
+    it('updates existing workflow', async () => {
+      const updatedWorkflow = { id: '1', name: 'Updated Workflow', description: 'Updated description' };
+      (api.updateWorkflow as jest.Mock).mockResolvedValueOnce({ data: updatedWorkflow });
 
-    const { result } = renderHook(() => useWorkflows(), { wrapper });
+      const { result } = renderHook(() => useUpdateWorkflow(), { wrapper });
 
-    await result.current.mutateAsync({ id: '1', name: 'Updated Workflow' });
+      await result.current.mutateAsync({ 
+        id: '1', 
+        data: { name: 'Updated Workflow', description: 'Updated description' } 
+      });
 
-    expect(api.updateWorkflow).toHaveBeenCalledWith('1', { name: 'Updated Workflow' });
+      expect(api.updateWorkflow).toHaveBeenCalledWith('1', { 
+        name: 'Updated Workflow', 
+        description: 'Updated description' 
+      });
+    });
   });
 
-  it('deletes workflow', async () => {
-    (api.deleteWorkflow as jest.Mock).mockResolvedValueOnce(undefined);
+  describe('useDeleteWorkflow hook', () => {
+    it('deletes workflow', async () => {
+      (api.deleteWorkflow as jest.Mock).mockResolvedValueOnce({ success: true });
 
-    const { result } = renderHook(() => useWorkflows(), { wrapper });
+      const { result } = renderHook(() => useDeleteWorkflow(), { wrapper });
 
-    await result.current.mutateAsync('1');
+      await result.current.mutateAsync('1');
 
-    expect(api.deleteWorkflow).toHaveBeenCalledWith('1');
+      expect(api.deleteWorkflow).toHaveBeenCalledWith('1');
+    });
+
+    it('handles delete workflow error', async () => {
+      const error = new Error('Failed to delete workflow');
+      (api.deleteWorkflow as jest.Mock).mockRejectedValueOnce(error);
+
+      const { result } = renderHook(() => useDeleteWorkflow(), { wrapper });
+
+      try {
+        await result.current.mutateAsync('1');
+      } catch (e) {
+        expect(e).toBe(error);
+      }
+
+      expect(api.deleteWorkflow).toHaveBeenCalled();
+    });
   });
 });

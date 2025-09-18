@@ -12,7 +12,7 @@ const createTestQueryClient = () => new QueryClient({
   defaultOptions: {
     queries: {
       retry: false,
-      cacheTime: 0,
+      gcTime: 0, // Updated from cacheTime to gcTime for React Query v5
       staleTime: 0,
       refetchOnWindowFocus: false,
     },
@@ -31,14 +31,21 @@ const Providers = ({ children }: { children: React.ReactNode }) => {
   );
 }
 
+// Export Providers as wrapper to match test-utils.d.ts
+export const wrapper = Providers;
+
 type ExtendedRenderOptions = Omit<RenderOptions, 'wrapper'> & {
   wrapper?: ComponentType;
 };
 
+interface CustomRenderResult extends RenderResult {
+  user: ReturnType<typeof userEvent.setup>;
+}
+
 function render(
   ui: ReactElement,
   options: ExtendedRenderOptions = {}
-) {
+): CustomRenderResult {
   const rendered = rtlRender(ui, {
     wrapper: Providers as ComponentType,
     ...options,

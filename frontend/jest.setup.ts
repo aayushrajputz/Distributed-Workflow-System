@@ -9,17 +9,47 @@ global.ResizeObserver = require('resize-observer-polyfill');
 // Mock API
 jest.mock('lib/api', () => ({
   api: {
+    // Auth methods
     login: jest.fn(),
     register: jest.fn(),
     getProfile: jest.fn(),
+    updateProfile: jest.fn(),
+    
+    // Workflow methods (flat structure)
     getWorkflows: jest.fn(),
+    getWorkflow: jest.fn(),
     createWorkflow: jest.fn(), 
     updateWorkflow: jest.fn(),
     deleteWorkflow: jest.fn(),
+    executeWorkflow: jest.fn(),
+    getWorkflowTasks: jest.fn(),
+    
+    // Task methods
     getTasks: jest.fn(),
+    getTask: jest.fn(),
     createTask: jest.fn(),
     updateTask: jest.fn(),
     deleteTask: jest.fn(),
+    
+    // Project methods
+    getProjects: jest.fn(),
+    getProject: jest.fn(),
+    createProject: jest.fn(),
+    updateProject: jest.fn(),
+    deleteProject: jest.fn(),
+    
+    // User methods
+    getUsers: jest.fn(),
+    getUser: jest.fn(),
+    updateUser: jest.fn(),
+    
+    // Notification methods
+    getNotifications: jest.fn(),
+    markNotificationRead: jest.fn(),
+    
+    // File methods
+    uploadFile: jest.fn(),
+    deleteFile: jest.fn(),
   },
   ApiError: jest.fn().mockImplementation((status, message) => {
     const error = new Error(message);

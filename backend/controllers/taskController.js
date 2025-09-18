@@ -520,6 +520,25 @@ const updateTask = asyncHandler(async (req, res) => {
     }
   }
 
+  // Capture the previous task state for workflow engine change detection
+  const oldTask = {
+    _id: task._id,
+    title: task.title,
+    description: task.description,
+    status: task.status,
+    priority: task.priority,
+    assignedTo: task.assignedTo,
+    assignedBy: task.assignedBy,
+    project: task.project,
+    tags: task.tags,
+    dueDate: task.dueDate,
+    scheduledDate: task.scheduledDate,
+    estimatedHours: task.estimatedHours,
+    completedAt: task.completedAt,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt
+  };
+
   // Track changes for notifications
   const previousAssignedTo = task.assignedTo?.toString();
 
@@ -559,6 +578,14 @@ const updateTask = asyncHandler(async (req, res) => {
   ]);
 
   task = updatedTask;
+
+  // Trigger workflow engine for task updates with proper change detection
+  try {
+    await workflowEngine.executeEventRules('task_updated', task, oldTask);
+  } catch (workflowError) {
+    console.error('Workflow engine error during task update:', workflowError.message);
+    // Continue with the update even if workflow engine fails
+  }
 
   // Send notifications for reassignment/updates
   try {
@@ -661,11 +688,41 @@ const updateTaskStatus = asyncHandler(async (req, res) => {
     });
   }
 
+  // Capture the previous task state for workflow engine change detection
+  const oldTask = {
+    _id: task._id,
+    title: task.title,
+    description: task.description,
+    status: task.status,
+    priority: task.priority,
+    assignedTo: task.assignedTo,
+    assignedBy: task.assignedBy,
+    project: task.project,
+    tags: task.tags,
+    dueDate: task.dueDate,
+    scheduledDate: task.scheduledDate,
+    estimatedHours: task.estimatedHours,
+    completedAt: task.completedAt,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt
+  };
+
   task.status = status;
+  if (status === 'completed') {
+    task.completedAt = new Date();
+  }
   await task.save();
 
   await task.populate('assignedBy', 'firstName lastName email');
   await task.populate('assignedTo', 'firstName lastName email');
+
+  // Trigger workflow engine for task status updates with proper change detection
+  try {
+    await workflowEngine.executeEventRules('task_updated', task, oldTask);
+  } catch (workflowError) {
+    console.error('Workflow engine error during task status update:', workflowError.message);
+    // Continue with the update even if workflow engine fails
+  }
 
   // Queue notifications when task is completed
   if (status === 'completed') {

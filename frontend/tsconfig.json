@@ -2,17 +2,19 @@
   "compilerOptions": {
     "lib": ["dom", "dom.iterable", "esnext"],
     "allowJs": true,
-    "target": "ES6",
+    "target": "ES2020",
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
     "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
     "module": "esnext",
     "moduleResolution": "node",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
+    "forceConsistentCasingInFileNames": true,
     "plugins": [
       {
         "name": "next"
@@ -20,18 +22,46 @@
     ],
     "paths": {
       "@/*": ["./*"],
-      "lib/*": ["./lib/*"]
+      "lib/*": ["./lib/*"],
+      "components/*": ["./components/*"],
+      "hooks/*": ["./hooks/*"],
+      "utils/*": ["./utils/*"],
+      "__tests__/*": ["./__tests__/*"]
     },
     "baseUrl": ".",
-    "types": ["jest", "node"],
-    "typeRoots": ["./node_modules/@types", "./__tests__/types"]
+    "types": [
+      "jest", 
+      "node", 
+      "@testing-library/jest-dom",
+      "@types/testing-library__jest-dom"
+    ],
+    "typeRoots": [
+      "./node_modules/@types", 
+      "./__tests__/types"
+    ]
   },
   "include": [
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
     ".next/types/**/*.ts",
-    "__tests__/types/**/*.d.ts"
+    "__tests__/types/**/*.d.ts",
+    "__tests__/**/*.ts",
+    "__tests__/**/*.tsx",
+    "__mocks__/**/*.ts",
+    "jest.config.ts",
+    "jest.setup.ts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    ".next",
+    "coverage",
+    "dist",
+    "build"
+  ],
+  "ts-node": {
+    "compilerOptions": {
+      "module": "commonjs"
+    }
+  }
 }

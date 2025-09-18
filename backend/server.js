@@ -55,8 +55,18 @@ console.log('📊 Prometheus metrics service initialized');
 noteSocketHandler(io);
 
 // Initialize task socket handler and notification service
-new TaskSocketHandler(io);
-notificationService.initialize(io);
+try {
+  new TaskSocketHandler(io);
+  console.log('✅ TaskSocketHandler initialized successfully');
+  
+  // Initialize notification service with proper error handling
+  notificationService.initialize(io);
+  console.log('✅ NotificationService initialized successfully');
+} catch (error) {
+  console.error('❌ Failed to initialize socket handlers or notification service:', error);
+  // Graceful degradation - continue without real-time features
+  console.warn('⚠️ Continuing without real-time notification features');
+}
 
 // Start workflow engine
 workflowEngine.start();

@@ -516,6 +516,138 @@ class TaskSocketHandler {
         socket.to(`task_${data.taskId}`).emit('user_typing', { userId: uid, taskId: data.taskId, typing: false });
       });
 
+      // Workflow execution events
+      socket.on('join_workflow_execution', async (executionId) => {
+        try {
+          const uid = this.userRooms.get(socket.id);
+          const role = socket.userRole;
+          if (!uid || !executionId) return;
+
+          // Check if user has access to this workflow execution
+          const WorkflowExecution = require('../models/WorkflowExecution');
+          const WorkflowTemplate = require('../models/WorkflowTemplate');
+          
+          const execution = await WorkflowExecution.findById(executionId).populate('workflowTemplateId');
+          if (!execution) {
+            socket.emit('error', { code: 'NOT_FOUND', message: 'Workflow execution not found' });
+            return;
+          }
+
+          let authorized = false;
+          if (role === 'admin' || role === 'manager') {
+            authorized = true;
+          } else if (execution.triggeredBy.toString() === uid) {
+            authorized = true;
+          } else {
+            // Check if user has access to the template
+            const template = execution.workflowTemplateId;
+            authorized = template.createdBy.toString() === uid ||
+                        template.isPublic ||
+                        template.sharedWith.some(share => share.userId.toString() === uid);
+          }
+
+          if (authorized) {
+            socket.join(`workflow_execution_${executionId}`);
+            logger.info(`Socket ${socket.id} joined workflow execution room: workflow_execution_${executionId}`);
+            
+            // Send current execution status
+            socket.emit('workflow_execution_status', {
+              executionId: execution.executionId,
+              status: execution.status,
+              progress: execution.progress,
+              currentStep: execution.currentStep,
+              startTime: execution.startTime,
+              endTime: execution.endTime,
+            });
+          } else {
+            socket.emit('error', { code: 'FORBIDDEN', message: 'No access to this workflow execution' });
+          }
+        } catch (error) {
+          logger.error('Error handling join_workflow_execution', { error });
+          socket.emit('error', { message: 'Failed to join workflow execution' });
+        }
+      });
+
+      socket.on('leave_workflow_execution', (executionId) => {
+        if (!executionId) return;
+        socket.leave(`workflow_execution_${executionId}`);
+        logger.info(`Socket ${socket.id} left workflow execution room: workflow_execution_${executionId}`);
+      });
+
+      socket.on('workflow_approval_response', async (data) => {
+        try {
+          const uid = this.userRooms.get(socket.id);
+          if (!uid || !data?.executionId || !data?.nodeId || !data?.response) return;
+
+          const WorkflowExecution = require('../models/WorkflowExecution');
+          const execution = await WorkflowExecution.findById(data.executionId);
+          
+          if (!execution) {
+            socket.emit('error', { code: 'NOT_FOUND', message: 'Workflow execution not found' });
+            return;
+          }
+
+          const step = execution.steps.find(s => s.nodeId === data.nodeId);
+          if (!step || step.status !== 'waiting_approval') {
+            socket.emit('error', { code: 'INVALID_STATE', message: 'Step is not waiting for approval' });
+            return;
+          }
+
+          if (step.assignedTo.toString() !== uid) {
+            socket.emit('error', { code: 'FORBIDDEN', message: 'You are not authorized to approve this step' });
+            return;
+          }
+
+          // Record approval response
+          step.approvals.push({
+            userId: uid,
+            status: data.response, // 'approved' or 'rejected'
+            comment: data.comment || '',
+            timestamp: new Date(),
+          });
+
+          if (data.response === 'approved') {
+            step.status = 'completed';
+            step.endTime = new Date();
+            step.duration = step.startTime ? step.endTime - step.startTime : 0;
+          } else {
+            step.status = 'failed';
+            step.endTime = new Date();
+            step.duration = step.startTime ? step.endTime - step.startTime : 0;
+            step.error = {
+              message: `Approval rejected: ${data.comment || 'No reason provided'}`,
+              code: 'APPROVAL_REJECTED',
+            };
+          }
+
+          await execution.save();
+
+          // Broadcast approval response
+          this.io.to(`workflow_execution_${data.executionId}`).emit('workflow_approval_response', {
+            executionId: data.executionId,
+            nodeId: data.nodeId,
+            response: data.response,
+            comment: data.comment,
+            approver: uid,
+            timestamp: new Date(),
+          });
+
+          // Continue workflow execution if approved
+          if (data.response === 'approved') {
+            try {
+              const workflowExecutor = require('../services/workflowExecutor');
+              await workflowExecutor.processNextNodes(execution, data.nodeId, { approved: true });
+            } catch (executorError) {
+              logger.error('Error continuing workflow after approval:', executorError);
+            }
+          }
+
+        } catch (error) {
+          logger.error('Error handling workflow approval response', { error });
+          socket.emit('error', { message: 'Failed to process approval response' });
+        }
+      });
+
       socket.on('disconnect', () => {
         this.handleDisconnect(socket);
       });
@@ -795,6 +927,53 @@ class TaskSocketHandler {
       timestamp: new Date(),
     });
     logger.info(`System announcement broadcasted: ${announcement.title}`);
+  }
+
+  // ============ Workflow Execution Broadcasting ============
+  broadcastWorkflowExecutionUpdate(executionId, update) {
+    this.io.to(`workflow_execution_${executionId}`).emit('workflow_execution_update', {
+      executionId,
+      ...update,
+      timestamp: new Date(),
+    });
+    logger.info(`Workflow execution update broadcasted for execution ${executionId}`);
+  }
+
+  broadcastWorkflowProgress(executionId, progress) {
+    this.io.to(`workflow_execution_${executionId}`).emit('workflow_progress', {
+      executionId,
+      progress,
+      timestamp: new Date(),
+    });
+  }
+
+  broadcastWorkflowStepUpdate(executionId, stepUpdate) {
+    this.io.to(`workflow_execution_${executionId}`).emit('workflow_step_update', {
+      executionId,
+      ...stepUpdate,
+      timestamp: new Date(),
+    });
+  }
+
+  broadcastWorkflowCompletion(executionId, result) {
+    this.io.to(`workflow_execution_${executionId}`).emit('workflow_completed', {
+      executionId,
+      result,
+      timestamp: new Date(),
+    });
+    logger.info(`Workflow completion broadcasted for execution ${executionId}`);
+  }
+
+  broadcastWorkflowError(executionId, error) {
+    this.io.to(`workflow_execution_${executionId}`).emit('workflow_error', {
+      executionId,
+      error: {
+        message: error.message,
+        code: error.code,
+      },
+      timestamp: new Date(),
+    });
+    logger.error(`Workflow error broadcasted for execution ${executionId}: ${error.message}`);
   }
 
   cleanupStaleConnections() {
