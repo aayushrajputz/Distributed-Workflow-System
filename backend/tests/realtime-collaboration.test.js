@@ -20,10 +20,22 @@ let token1; let
   token2;
 
 beforeAll(async () => {
-  // Setup MongoDB
-  mongoServer = await MongoMemoryServer.create();
-  const mongoUri = mongoServer.getUri();
-  await mongoose.connect(mongoUri);
+  // Setup MongoDB - try memory server first, fallback to local test DB
+  try {
+    mongoServer = await MongoMemoryServer.create({
+      instance: {
+        port: undefined, // Let it choose a random port
+        ip: '127.0.0.1', // Use localhost instead of 0.0.0.0
+      }
+    });
+    const mongoUri = mongoServer.getUri();
+    await mongoose.connect(mongoUri);
+  } catch (error) {
+    console.warn('MongoDB Memory Server failed, using local test database');
+    // Fallback to local test database
+    const testDbUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/workflow_test';
+    await mongoose.connect(testDbUri);
+  }
 
   // Create test users
   user1 = await User.create({
@@ -83,7 +95,9 @@ afterAll(async () => {
   clientSocket2?.disconnect();
   httpServer?.close();
   await mongoose.disconnect();
-  await mongoServer.stop();
+  if (mongoServer) {
+    await mongoServer.stop();
+  }
 });
 
 beforeEach(async () => {

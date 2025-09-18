@@ -25,3 +25,16 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# E2E testing artifacts
+/test-results/
+/playwright-report/
+/e2e/auth-states/
+/e2e/temp/
+/e2e/downloads/
+/e2e/.test-state.json
+/playwright/.cache/
+*.trace.zip
+*.webm
+*.png
+/test-archive/

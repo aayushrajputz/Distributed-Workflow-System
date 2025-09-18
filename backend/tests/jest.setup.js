@@ -1,3 +1,6 @@
+// Load test environment variables
+require('dotenv').config({ path: '.env.test' });
+
 // Extend Jest matchers if needed
 require('jest-extended');
 
@@ -7,11 +10,12 @@ const { createServer } = require('http');
 const Client = require('socket.io-client');
 const { promisify } = require('util');
 
-// Set test environment variables
+// Override any missing test environment variables
 process.env.NODE_ENV = 'test';
-process.env.JWT_SECRET = 'test-jwt-secret-key-for-unit-tests';
-process.env.API_KEY_SECRET = 'test-api-key-secret-for-unit-tests';
-process.env.ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-key-for-unit-tests-that-is-at-least-32-characters-long';
+process.env.MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/workflow_test';
+process.env.API_KEY_SECRET = process.env.API_KEY_SECRET || 'test-api-key-secret-for-unit-tests';
+process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 process.env.GITHUB_WEBHOOK_SECRET = 'test-github-webhook-secret';
 process.env.ZAPIER_WHITELIST = 'localhost,.company.com';
 process.env.SLACK_WEBHOOK_URL = 'https://hooks.slack.com/test-webhook';

@@ -1,7 +1,7 @@
 const request = require('supertest');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
-const { app } = require('../server');
+const app = require('../app');
 const User = require('../models/User');
 const Note = require('../models/Note');
 
@@ -13,9 +13,22 @@ let owner; let collaborator; let
 let testNote;
 
 beforeAll(async () => {
-  mongoServer = await MongoMemoryServer.create();
-  const mongoUri = mongoServer.getUri();
-  await mongoose.connect(mongoUri);
+  // Setup MongoDB - try memory server first, fallback to local test DB
+  try {
+    mongoServer = await MongoMemoryServer.create({
+      instance: {
+        port: undefined, // Let it choose a random port
+        ip: '127.0.0.1', // Use localhost instead of 0.0.0.0
+      }
+    });
+    const mongoUri = mongoServer.getUri();
+    await mongoose.connect(mongoUri);
+  } catch (error) {
+    console.warn('MongoDB Memory Server failed, using local test database');
+    // Fallback to local test database
+    const testDbUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/workflow_test';
+    await mongoose.connect(testDbUri);
+  }
 
   // Create test users
   owner = await User.create({
@@ -61,7 +74,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await mongoose.disconnect();
-  await mongoServer.stop();
+  if (mongoServer) {
+    await mongoServer.stop();
+  }
 });
 
 beforeEach(async () => {

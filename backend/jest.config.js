@@ -91,6 +91,11 @@ module.exports = {
   ],
   moduleFileExtensions: ['js', 'json'],
 
+  // Transform ES modules
+  transformIgnorePatterns: [
+    'node_modules/(?!(p-timeout|p-finally|p-defer|p-is-promise)/)'
+  ],
+
   // Performance and execution
   maxWorkers: '50%',
   clearMocks: true,

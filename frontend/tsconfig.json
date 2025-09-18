@@ -23,7 +23,7 @@
       "lib/*": ["./lib/*"]
     },
     "baseUrl": ".",
-    "types": ["jest", "@testing-library/jest-dom", "node"],
+    "types": ["jest", "node"],
     "typeRoots": ["./node_modules/@types", "./__tests__/types"]
   },
   "include": [

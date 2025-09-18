@@ -249,11 +249,11 @@ export default function AuthPage() {
           <CardContent>
             <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
               <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="login" className="flex items-center gap-2">
+                <TabsTrigger value="login" className="flex items-center gap-2" data-testid="login-tab">
                   <LogIn className="h-4 w-4" />
                   Login
                 </TabsTrigger>
-                <TabsTrigger value="signup" className="flex items-center gap-2">
+                <TabsTrigger value="signup" className="flex items-center gap-2" data-testid="signup-tab">
                   <UserPlus className="h-4 w-4" />
                   Sign Up
                 </TabsTrigger>
@@ -275,6 +275,7 @@ export default function AuthPage() {
                         onChange={handleLoginChange}
                         placeholder="Enter your email"
                         className="pl-10"
+                        data-testid="login-email-input"
                       />
                     </div>
                   </div>
@@ -293,6 +294,7 @@ export default function AuthPage() {
                         onChange={handleLoginChange}
                         placeholder="Enter your password"
                         className="pl-10"
+                        data-testid="login-password-input"
                       />
                     </div>
                   </div>
@@ -301,6 +303,7 @@ export default function AuthPage() {
                     type="submit" 
                     className="w-full" 
                     disabled={loading}
+                    data-testid="login-submit-button"
                   >
                     {loading ? (
                       <>
@@ -330,6 +333,7 @@ export default function AuthPage() {
                         value={signupData.firstName}
                         onChange={handleSignupChange}
                         placeholder="John"
+                        data-testid="signup-firstname-input"
                       />
                     </div>
                     <div>
@@ -342,6 +346,7 @@ export default function AuthPage() {
                         value={signupData.lastName}
                         onChange={handleSignupChange}
                         placeholder="Doe"
+                        data-testid="signup-lastname-input"
                       />
                     </div>
                   </div>
@@ -359,6 +364,7 @@ export default function AuthPage() {
                         onChange={handleSignupChange}
                         placeholder="johndoe"
                         className="pl-10"
+                        data-testid="signup-username-input"
                       />
                     </div>
                   </div>
@@ -377,6 +383,7 @@ export default function AuthPage() {
                         onChange={handleSignupChange}
                         placeholder="john@example.com"
                         className="pl-10"
+                        data-testid="signup-email-input"
                       />
                     </div>
                   </div>
@@ -395,6 +402,7 @@ export default function AuthPage() {
                         onChange={handleSignupChange}
                         placeholder="Create a strong password"
                         className="pl-10"
+                        data-testid="signup-password-input"
                       />
                     </div>
                     
@@ -431,6 +439,7 @@ export default function AuthPage() {
                     type="submit" 
                     className="w-full" 
                     disabled={loading}
+                    data-testid="signup-submit-button"
                   >
                     {loading ? (
                       <>

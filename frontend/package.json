@@ -11,7 +11,16 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:ci": "jest --ci --coverage --runInBand",
-    "test:debug": "node --inspect-brk node_modules/.bin/jest --runInBand"
+    "test:debug": "node --inspect-brk node_modules/.bin/jest --runInBand",
+    "e2e": "playwright test",
+    "e2e:headed": "playwright test --headed",
+    "e2e:debug": "playwright test --debug",
+    "e2e:ui": "playwright test --ui",
+    "e2e:report": "playwright show-report",
+    "e2e:install": "playwright install --with-deps",
+    "test:e2e:setup": "docker-compose -f ../docker-compose.yml up -d --build",
+    "test:e2e:teardown": "docker-compose -f ../docker-compose.yml down",
+    "test:e2e:full": "npm run test:e2e:setup && npm run e2e && npm run test:e2e:teardown"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -71,6 +80,8 @@
     "zod": "3.25.67"
   },
   "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "@playwright/experimental-ct-react": "^1.40.0",
     "@tailwindcss/postcss": "^4.1.9",
     "@testing-library/jest-dom": "^6.1.5",
     "@testing-library/react": "^14.1.2",
