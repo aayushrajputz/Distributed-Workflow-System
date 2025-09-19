@@ -100,32 +100,51 @@ const sanitizeInput = (req, res, next) => {
     req.query = sanitized;
   }
 
-  // Sanitize headers
-  if (req.headers) {
-    // Remove potentially dangerous headers
-    delete req.headers['x-forwarded-for'];
-    delete req.headers['x-real-ip'];
-  }
-
   next();
 };
 
-// CSRF protection middleware
+// CSRF token issuance middleware
+const issueCsrfToken = (req, res, next) => {
+  const CSRF_COOKIE_NAME = process.env.CSRF_COOKIE_NAME || '_csrf';
+  
+  // If no CSRF token cookie exists, generate a new one
+  if (!req.cookies[CSRF_COOKIE_NAME]) {
+    const crypto = require('crypto');
+    const csrfToken = crypto.randomBytes(32).toString('hex');
+    
+    // Set the CSRF token as a cookie
+    res.cookie(CSRF_COOKIE_NAME, csrfToken, {
+      httpOnly: false, // Must be accessible to JavaScript
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    });
+  }
+  
+  next();
+};
+
+// CSRF protection middleware using double-submit cookie pattern
 const csrfProtection = (req, res, next) => {
-  // Skip CSRF for API endpoints that use API keys
+  const CSRF_COOKIE_NAME = process.env.CSRF_COOKIE_NAME || '_csrf';
+  const CSRF_HEADER_NAME = (process.env.CSRF_HEADER_NAME || 'X-CSRF-Token').toLowerCase();
+  
+  // Skip CSRF for API endpoints that use API keys or API v1 routes
   if (req.path.startsWith('/api/v1/') || req.headers['x-api-key']) {
     return next();
   }
 
-  // For browser requests, check CSRF token
+  // Skip for safe methods
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
     return next();
   }
 
-  const csrfToken = req.headers['x-csrf-token'] || req.body._csrf;
-  const sessionToken = req.session?.csrfToken;
+  // Get token from cookie and header
+  const cookieToken = req.cookies[CSRF_COOKIE_NAME];
+  const headerToken = req.headers[CSRF_HEADER_NAME.toLowerCase()] || req.body._csrf;
 
-  if (!csrfToken || !sessionToken || csrfToken !== sessionToken) {
+  // Validate token
+  if (!cookieToken || !headerToken || cookieToken !== headerToken) {
     return res.status(403).json({
       error: 'CSRF token validation failed',
       code: 'CSRF_ERROR',
@@ -237,6 +256,7 @@ module.exports = {
   createRateLimiters,
   securityHeaders,
   sanitizeInput,
+  issueCsrfToken,
   csrfProtection,
   corsConfig,
   requestSizeLimit,

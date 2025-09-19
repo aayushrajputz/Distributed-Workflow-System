@@ -4,10 +4,25 @@ const compression = require('compression');
 const mongoSanitize = require('express-mongo-sanitize');
 const xss = require('xss-clean');
 const hpp = require('hpp');
+const cookieParser = require('cookie-parser');
 
 // Import configurations and utilities
 const { errorHandler } = require('./middleware/errorHandler');
-const { corsConfig, requestSizeLimit, sanitizeInput } = require('./middleware/security');
+const { 
+  corsConfig, 
+  requestSizeLimit, 
+  sanitizeInput, 
+  securityMiddleware, 
+  securityHeaders, 
+  securityLogger, 
+  csrfProtection 
+} = require('./middleware/security');
+const { 
+  generalRateLimiter, 
+  authRateLimiter, 
+  apiKeyRateLimiter, 
+  sensitiveRateLimiter 
+} = require('./middleware/rateLimiter');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -29,20 +44,44 @@ const webhooksRoutes = require('./routes/webhooks');
 // Initialize Express app
 const app = express();
 
-// CORS configuration
-app.use(cors(corsConfig));
+// Configure trust proxy for proper IP resolution
+app.set('trust proxy', Number(process.env.TRUST_PROXY || 1));
 
-// Input sanitization
+// Apply security measures for input sanitization
 app.use(mongoSanitize());
 app.use(xss());
 app.use(hpp());
+app.use(sanitizeInput);
+
+// Security logging middleware (should be first to log all requests)
+app.use(securityLogger);
+
+// Cookie parsing middleware
+app.use(cookieParser(process.env.COOKIE_SECRET || undefined));
+
+// CORS configuration
+app.use(cors(corsConfig));
+
+// Apply comprehensive security middleware stack
+app.use(securityMiddleware);
+app.use(securityHeaders);
+
+// Apply rate limiters
+app.use(generalRateLimiter); // Apply general rate limiter to all routes
 
 // Body parsing middleware with size limits
 app.use(express.json(requestSizeLimit));
 app.use(express.urlencoded(requestSizeLimit));
 
-// Input sanitization middleware
-app.use(sanitizeInput);
+// CSRF token issuance and protection
+app.use(issueCsrfToken);
+app.use(csrfProtection);
+
+// CSRF token endpoint for clients that cannot read cookies
+app.get('/csrf-token', (req, res) => {
+  const CSRF_COOKIE_NAME = process.env.CSRF_COOKIE_NAME || '_csrf';
+  res.json({ token: req.cookies[CSRF_COOKIE_NAME] });
+});
 
 // Compression middleware
 app.use(compression());
@@ -57,18 +96,18 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API routes
-app.use('/api/auth', authRoutes);
+// API routes with specific rate limiters
+app.use('/api/auth', authRateLimiter, authRoutes);
 app.use('/api/notes', noteRoutes);
 app.use('/api/notes', shareRoutes);
-app.use('/api/keys', apiKeyRoutes);
+app.use('/api/keys', sensitiveRateLimiter, apiKeyRoutes);
 app.use('/api/analytics', analyticsRoutes);
-app.use('/api/system', systemRoutes);
+app.use('/api/system', sensitiveRateLimiter, systemRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/notifications', notificationRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/integrations', integrationRoutes);
-app.use('/api/v1', publicApiRoutes); // Public API endpoints
+app.use('/api/users', sensitiveRateLimiter, userRoutes);
+app.use('/api/integrations', sensitiveRateLimiter, integrationRoutes);
+app.use('/api/v1', apiKeyRateLimiter, publicApiRoutes); // Public API endpoints with API key rate limiting
 app.use('/api/v1/metrics', metricsRoutes); // Prometheus metrics endpoints
 app.use('/webhook/zapier', zapierWebhookRoutes);
 app.use('/webhook/github', githubWebhookRoutes);
