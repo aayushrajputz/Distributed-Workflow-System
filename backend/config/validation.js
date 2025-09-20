@@ -47,9 +47,15 @@ const validateEnvironment = () => {
   requireVar('MONGODB_URI');
   requireVar('JWT_SECRET');
   requireVar('NODE_ENV');
-  requireVar('REFRESH_TOKEN_SECRET');
-  requireVar('PORT');
-  requireVar('CLIENT_URL');
+  // Support both REFRESH_TOKEN_SECRET and JWT_REFRESH_SECRET env names
+  if (!process.env.REFRESH_TOKEN_SECRET && !process.env.JWT_REFRESH_SECRET) {
+    throw new Error('Missing required environment variable: REFRESH_TOKEN_SECRET or JWT_REFRESH_SECRET');
+  }
+  // In production, require PORT and CLIENT_URL; in development allow defaults
+  if (isProd) {
+    requireVar('PORT');
+    requireVar('CLIENT_URL');
+  }
   
   // Validate JWT_SECRET length
   if (process.env.JWT_SECRET.length < 32) {
@@ -67,12 +73,13 @@ const validateEnvironment = () => {
     throw new Error(`NODE_ENV must be one of: ${validEnvs.join(', ')}`);
   }
 
-  // Validate REFRESH_TOKEN_SECRET
-  if (process.env.REFRESH_TOKEN_SECRET.length < 32) {
-    throw new Error('REFRESH_TOKEN_SECRET must be at least 32 characters long for security');
+  // Validate refresh secret length and difference
+  const refreshSecret = process.env.REFRESH_TOKEN_SECRET || process.env.JWT_REFRESH_SECRET;
+  if (refreshSecret.length < 32) {
+    throw new Error('Refresh token secret must be at least 32 characters long for security');
   }
-  if (process.env.REFRESH_TOKEN_SECRET === process.env.JWT_SECRET) {
-    throw new Error('REFRESH_TOKEN_SECRET must be different from JWT_SECRET for security');
+  if (refreshSecret === process.env.JWT_SECRET) {
+    throw new Error('Refresh token secret must be different from JWT_SECRET for security');
   }
 
   // Validate PORT as a number
@@ -80,8 +87,10 @@ const validateEnvironment = () => {
     requireNumber('PORT', { min: 1, max: 65535 });
   }
 
-  // Validate CLIENT_URL as a proper URL
-  requireUrl('CLIENT_URL');
+  // Validate CLIENT_URL as a proper URL if provided
+  if (process.env.CLIENT_URL) {
+    requireUrl('CLIENT_URL');
+  }
 
   // Validate CORS_ORIGINS
   const origins = parseCsv('CORS_ORIGINS');
@@ -89,10 +98,10 @@ const validateEnvironment = () => {
     console.warn('⚠️ CORS_ORIGINS should be explicitly set in production');
   }
 
-  // Validate rate limits as integers with ranges
-  requireNumber('RATE_LIMIT_WINDOW_MS', {min: 60000, max: 24*60*60*1000});
-  requireNumber('RATE_LIMIT_MAX_REQUESTS', {min: 1, max: 1000});
-  requireNumber('API_KEY_RATE_LIMIT', {min: 1, max: 100000});
+  // Validate rate limits as integers with ranges if provided (enforced in production)
+  if (process.env.RATE_LIMIT_WINDOW_MS) requireNumber('RATE_LIMIT_WINDOW_MS', {min: 60000, max: 24*60*60*1000});
+  if (process.env.RATE_LIMIT_MAX_REQUESTS) requireNumber('RATE_LIMIT_MAX_REQUESTS', {min: 1, max: 1000});
+  if (process.env.API_KEY_RATE_LIMIT) requireNumber('API_KEY_RATE_LIMIT', {min: 1, max: 100000});
 
   // Validate CORS_ORIGINS
   const corsOrigins = parseCsv('CORS_ORIGINS');

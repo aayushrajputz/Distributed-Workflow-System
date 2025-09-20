@@ -252,7 +252,10 @@ const userSchema = new mongoose.Schema({
       devices: [{
         token: { type: String },
         platform: { type: String, enum: ['web', 'ios', 'android'], default: 'web' },
+        deviceId: { type: String },
+        appVersion: { type: String },
         addedAt: { type: Date, default: Date.now },
+        lastUsed: { type: Date },
       }],
       task_assigned: { type: Boolean, default: true },
       task_completed: { type: Boolean, default: true },

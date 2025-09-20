@@ -61,6 +61,48 @@ class PrometheusService {
       registers: [this.register],
     });
 
+    // Notification metrics
+    this.notificationDeliveryCounter = new promClient.Counter({
+      name: 'notification_delivery_total',
+      help: 'Total notifications delivery attempts',
+      labelNames: ['channel', 'status', 'type'],
+      registers: [this.register],
+    });
+
+    this.notificationReadHistogram = new promClient.Histogram({
+      name: 'notification_read_time_ms',
+      help: 'Notification read time in ms',
+      buckets: [50, 100, 250, 500, 1000, 2000, 5000, 10000],
+      registers: [this.register],
+    });
+
+    this.notificationProcessingHistogram = new promClient.Histogram({
+      name: 'notification_processing_time_ms',
+      help: 'Notification processing time in ms',
+      buckets: [10, 50, 100, 250, 500, 1000, 2000],
+      registers: [this.register],
+    });
+
+    this.notificationRetryCounter = new promClient.Counter({
+      name: 'notification_retries_total',
+      help: 'Total notification retries',
+      registers: [this.register],
+    });
+
+    this.notificationErrorCounter = new promClient.Counter({
+      name: 'notification_errors_total',
+      help: 'Notification errors by type and channel',
+      labelNames: ['error_type', 'channel'],
+      registers: [this.register],
+    });
+
+    this.rateLimitCounter = new promClient.Counter({
+      name: 'rate_limit_events_total',
+      help: 'Rate limit events',
+      labelNames: ['limit_type', 'action', 'role'],
+      registers: [this.register],
+    });
+
     // API metrics
     this.apiRequestsTotal = new promClient.Counter({
       name: 'api_requests_total',
@@ -194,6 +236,29 @@ class PrometheusService {
     const completed = taskStats.completed || 0;
     const completionRate = (completed / total) * 100;
     this.taskCompletionRate.set(completionRate);
+  }
+
+  // Notification metric helpers
+  recordNotificationDelivery(channel, success, deliveryTimeMs = 0, type = 'unknown') {
+    this.notificationDeliveryCounter.inc({ channel, status: success ? 'success' : 'failed', type });
+    if (deliveryTimeMs > 0) this.notificationProcessingHistogram.observe(deliveryTimeMs);
+  }
+
+  recordNotificationRead(readTimeMs = 0) {
+    if (readTimeMs > 0) this.notificationReadHistogram.observe(readTimeMs);
+  }
+
+  recordNotificationError(errorType = 'unknown', channel = 'unknown') {
+    this.notificationErrorCounter.inc({ error_type: errorType, channel });
+  }
+
+  recordNotificationRetry(attemptNumber = 1) {
+    this.notificationRetryCounter.inc(attemptNumber);
+  }
+
+  // Rate limit metrics
+  recordRateLimit(limitType, action, role) {
+    this.rateLimitCounter.inc({ limit_type: limitType, action, role });
   }
 
   // Update node health metrics

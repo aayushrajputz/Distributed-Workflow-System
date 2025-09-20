@@ -175,7 +175,7 @@ const noteSocketHandler = (io) => {
         if (optimistic) {
           socket.to(`note-${noteId}`).emit('note:update', {
             noteId,
-            content: 'Optimistic update from user1',
+            content,
             title,
             version: note.version,
             changedBy: {
@@ -198,7 +198,7 @@ const noteSocketHandler = (io) => {
           }
 
           if (content !== undefined) {
-            note.content = 'Saved update';
+            note.content = content;
             hasChanges = true;
           }
 

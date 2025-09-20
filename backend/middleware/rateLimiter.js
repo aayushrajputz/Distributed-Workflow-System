@@ -120,4 +120,17 @@ module.exports = {
   createApiKeyRateLimiter,
   authRateLimiter,
   generalRateLimiter,
+  // Provide ready-to-use middlewares expected by app.js
+  apiKeyRateLimiter: createApiKeyRateLimiter(),
+  sensitiveRateLimiter: rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    message: {
+      success: false,
+      message: 'Too many sensitive operations, please try again later.',
+      code: 'SENSITIVE_RATE_LIMIT_EXCEEDED',
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+  }),
 };

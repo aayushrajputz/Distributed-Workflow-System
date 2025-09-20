@@ -68,6 +68,11 @@ const notificationSchema = new mongoose.Schema({
       opened: { type: Boolean, default: false },
       openedAt: Date,
     },
+    push: {
+      sent: { type: Boolean, default: false },
+      sentAt: Date,
+      providerId: String,
+    },
     slack: {
       sent: { type: Boolean, default: false },
       sentAt: Date,

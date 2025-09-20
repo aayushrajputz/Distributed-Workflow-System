@@ -1,4 +1,9 @@
-const admin = require('firebase-admin');
+let admin = null;
+try {
+  admin = require('firebase-admin');
+} catch (e) {
+  // Optional dependency; push will be disabled if not present
+}
 const User = require('../models/User');
 const { getPrometheusService } = require('./prometheusService');
 
@@ -27,7 +32,7 @@ class PushService {
       const serviceAccountKey = process.env.FCM_SERVICE_ACCOUNT_KEY;
       const projectId = process.env.FCM_PROJECT_ID;
 
-      if (!serviceAccountKey || !projectId) {
+      if (!admin || !serviceAccountKey || !projectId) {
         console.warn('⚠️ FCM credentials not configured. Push notifications disabled.');
         return;
       }
@@ -311,8 +316,8 @@ class PushService {
       console.log(`🧹 Cleaning up ${invalidTokens.length} invalid tokens`);
       
       await User.updateMany(
-        { 'pushTokens.token': { $in: invalidTokens } },
-        { $pull: { pushTokens: { token: { $in: invalidTokens } } } }
+        { 'notificationPreferences.push.devices.token': { $in: invalidTokens } },
+        { $pull: { 'notificationPreferences.push.devices': { token: { $in: invalidTokens } } } }
       );
 
       this.metrics.invalidTokens += invalidTokens.length;
@@ -339,11 +344,16 @@ class PushService {
         throw new Error('User not found');
       }
 
+      // Ensure structure
+      if (!user.notificationPreferences) user.notificationPreferences = {};
+      if (!user.notificationPreferences.push) user.notificationPreferences.push = { enabled: true, devices: [] };
+      const devices = Array.isArray(user.notificationPreferences.push.devices) ? user.notificationPreferences.push.devices : [];
+
       // Remove existing token if present
-      user.pushTokens = user.pushTokens.filter(t => t.token !== token);
+      user.notificationPreferences.push.devices = devices.filter(t => t.token !== token);
 
       // Add new token
-      user.pushTokens.push({
+      user.notificationPreferences.push.devices.push({
         token,
         platform: deviceInfo.platform || 'unknown',
         deviceId: deviceInfo.deviceId,
@@ -353,8 +363,9 @@ class PushService {
       });
 
       // Keep only last 5 tokens per user
-      if (user.pushTokens.length > 5) {
-        user.pushTokens = user.pushTokens
+      const list = user.notificationPreferences.push.devices;
+      if (list.length > 5) {
+        user.notificationPreferences.push.devices = list
           .sort((a, b) => b.registeredAt - a.registeredAt)
           .slice(0, 5);
       }
@@ -378,7 +389,7 @@ class PushService {
     try {
       await User.findByIdAndUpdate(
         userId,
-        { $pull: { pushTokens: { token } } }
+        { $pull: { 'notificationPreferences.push.devices': { token } } }
       );
 
       console.log(`✅ Unregistered push token for user ${userId}`);
@@ -396,17 +407,18 @@ class PushService {
    */
   async getUserTokens(userId) {
     try {
-      const user = await User.findById(userId).select('pushTokens');
-      if (!user || !user.pushTokens) {
+      const user = await User.findById(userId).select('notificationPreferences.push.devices');
+      const devices = user?.notificationPreferences?.push?.devices || [];
+      if (!user || devices.length === 0) {
         return [];
       }
 
       // Update last used timestamp
-      const tokens = user.pushTokens.map(tokenObj => tokenObj.token);
+      const tokens = devices.map(tokenObj => tokenObj.token);
       if (tokens.length > 0) {
         await User.findByIdAndUpdate(
           userId,
-          { $set: { 'pushTokens.$[].lastUsed': new Date() } }
+          { $set: { 'notificationPreferences.push.devices.$[].lastUsed': new Date() } }
         );
       }
 
@@ -497,11 +509,13 @@ class PushService {
       const prometheusService = getPrometheusService();
       if (prometheusService) {
         results.forEach(result => {
-          prometheusService.recordPushNotification(
-            result.successCount,
-            result.failureCount,
-            result.invalidTokens || 0
-          );
+          // Approximate: record deliveries as successes and failures on 'push' channel
+          if (result.successCount > 0) {
+            prometheusService.recordNotificationDelivery('push', true, 0, 'batch');
+          }
+          if (result.failureCount > 0) {
+            prometheusService.recordNotificationDelivery('push', false, 0, 'batch');
+          }
         });
       }
     } catch (error) {
