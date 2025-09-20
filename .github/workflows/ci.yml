@@ -51,29 +51,29 @@ jobs:
 
   test-frontend:
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v3
-    
+
     - name: Setup Node.js
       uses: actions/setup-node@v3
       with:
         node-version: '18'
         cache: 'npm'
         cache-dependency-path: frontend/package-lock.json
-    
+
     - name: Install frontend dependencies
       run: |
         cd frontend
-        npm ci
-    
+        npm ci --legacy-peer-deps
+
     - name: Run frontend tests
       run: |
         cd frontend
         npm test
       env:
         NEXT_PUBLIC_API_URL: http://localhost:5000
-    
+
     - name: Build frontend
       run: |
         cd frontend
@@ -96,7 +96,7 @@ jobs:
     - name: Install dependencies
       run: |
         cd backend && npm ci
-        cd ../frontend && npm ci
+        cd ../frontend && npm ci --legacy-peer-deps
     
     - name: Run ESLint
       run: |
