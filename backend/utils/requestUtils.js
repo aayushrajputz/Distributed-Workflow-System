@@ -1,5 +1,5 @@
 const axios = require('axios');
-const axiosRetry = require('axios-retry');
+const axiosRetry = require('axios-retry').default || require('axios-retry');
 const pTimeout = require('p-timeout');
 const logger = require('./logger');
 
@@ -53,9 +53,11 @@ class CircuitBreaker {
 // Configure axios retry with exponential backoff
 axiosRetry(axios, {
   retries: 3,
-  retryDelay: axiosRetry.exponentialDelay,
+  retryDelay: (retryCount, error) => axiosRetry.exponentialDelay(retryCount, error),
   retryCondition: (error) => {
-    return axiosRetry.isNetworkOrIdempotentRequestError(error) ||
+    return (axiosRetry.isNetworkOrIdempotentRequestError
+              ? axiosRetry.isNetworkOrIdempotentRequestError(error)
+              : ['ECONNABORTED', 'ENOTFOUND', 'ETIMEDOUT'].includes(error.code)) ||
            (error.response && error.response.status >= 500);
   }
 });

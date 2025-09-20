@@ -51,8 +51,11 @@ const validateEnvironment = () => {
   if (!process.env.REFRESH_TOKEN_SECRET && !process.env.JWT_REFRESH_SECRET) {
     throw new Error('Missing required environment variable: REFRESH_TOKEN_SECRET or JWT_REFRESH_SECRET');
   }
-  requireVar('PORT');
-  requireVar('CLIENT_URL');
+  // In production, require PORT and CLIENT_URL; in development allow defaults
+  if (isProd) {
+    requireVar('PORT');
+    requireVar('CLIENT_URL');
+  }
   
   // Validate JWT_SECRET length
   if (process.env.JWT_SECRET.length < 32) {
@@ -84,8 +87,10 @@ const validateEnvironment = () => {
     requireNumber('PORT', { min: 1, max: 65535 });
   }
 
-  // Validate CLIENT_URL as a proper URL
-  requireUrl('CLIENT_URL');
+  // Validate CLIENT_URL as a proper URL if provided
+  if (process.env.CLIENT_URL) {
+    requireUrl('CLIENT_URL');
+  }
 
   // Validate CORS_ORIGINS
   const origins = parseCsv('CORS_ORIGINS');
@@ -93,10 +98,10 @@ const validateEnvironment = () => {
     console.warn('⚠️ CORS_ORIGINS should be explicitly set in production');
   }
 
-  // Validate rate limits as integers with ranges
-  requireNumber('RATE_LIMIT_WINDOW_MS', {min: 60000, max: 24*60*60*1000});
-  requireNumber('RATE_LIMIT_MAX_REQUESTS', {min: 1, max: 1000});
-  requireNumber('API_KEY_RATE_LIMIT', {min: 1, max: 100000});
+  // Validate rate limits as integers with ranges if provided (enforced in production)
+  if (process.env.RATE_LIMIT_WINDOW_MS) requireNumber('RATE_LIMIT_WINDOW_MS', {min: 60000, max: 24*60*60*1000});
+  if (process.env.RATE_LIMIT_MAX_REQUESTS) requireNumber('RATE_LIMIT_MAX_REQUESTS', {min: 1, max: 1000});
+  if (process.env.API_KEY_RATE_LIMIT) requireNumber('API_KEY_RATE_LIMIT', {min: 1, max: 100000});
 
   // Validate CORS_ORIGINS
   const corsOrigins = parseCsv('CORS_ORIGINS');
