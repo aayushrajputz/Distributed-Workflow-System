@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, query, param } = require('express-validator');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { handleValidationErrors } = require('../middleware/validation');
 const notificationService = require('../services/notificationService');
 const notificationMetricsService = require('../services/notificationMetricsService');
@@ -587,23 +587,32 @@ router.get('/', notificationRead(), getNotificationsValidation, handleValidation
 router.get('/unread-count', notificationRead(), getUnreadCount);
 router.get('/stats', getNotificationStats);
 router.get('/preferences', getNotificationPreferences);
-router.get('/analytics', authorize(['admin', 'manager']), getNotificationAnalytics);
-router.get('/templates', authorize(['admin', 'manager']), getNotificationTemplates);
-router.get('/health', authorize(['admin']), getNotificationHealth);
+// simple role-based guards using req.user.role
+const requireRole = (roles) => (req, res, next) => {
+  const allowed = Array.isArray(roles) ? roles : [roles];
+  if (!req.user || !allowed.includes(req.user.role)) {
+    return res.status(403).json({ success: false, message: 'Insufficient permissions' });
+  }
+  next();
+};
+
+router.get('/analytics', requireRole(['admin', 'manager']), getNotificationAnalytics);
+router.get('/templates', requireRole(['admin', 'manager']), getNotificationTemplates);
+router.get('/health', requireRole(['admin']), getNotificationHealth);
 router.get('/rate-limit-status', getRateLimitStatusEndpoint);
 router.get('/export', authorize(['admin']), exportNotificationData);
 router.get('/:id/delivery-status', getDeliveryStatus);
 
 router.post('/mark-read', notificationRead(), markAsReadValidation, handleValidationErrors, markAsRead);
 router.post('/mark-all-read', notificationRead(), markAllAsRead);
-router.post('/broadcast', authorize(['admin', 'manager']), systemAnnouncement(), broadcastValidation, handleValidationErrors, broadcastNotification);
-router.post('/test', authorize(['admin']), notificationSend(), testNotification);
+router.post('/broadcast', requireRole(['admin', 'manager']), systemAnnouncement(), broadcastValidation, handleValidationErrors, broadcastNotification);
+router.post('/test', requireRole(['admin']), notificationSend(), testNotification);
 router.post('/push/register', tokenRegistration(), pushTokenValidation, handleValidationErrors, registerPushToken);
 router.post('/push/test', notificationSend(), testPushNotification);
-router.post('/templates/:templateId/test', authorize(['admin']), templateTestValidation, handleValidationErrors, testNotificationTemplate);
+router.post('/templates/:templateId/test', requireRole(['admin']), templateTestValidation, handleValidationErrors, testNotificationTemplate);
 
 router.put('/preferences', preferencesUpdate(), updateNotificationPreferences);
-router.put('/preferences/bulk', authorize(['admin']), bulkUpdatePreferences);
+router.put('/preferences/bulk', requireRole(['admin']), bulkUpdatePreferences);
 
 router.delete('/:id', deleteNotification);
 router.delete('/push/unregister', tokenRegistration(), unregisterPushToken);

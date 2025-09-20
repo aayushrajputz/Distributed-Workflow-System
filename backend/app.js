@@ -15,7 +15,8 @@ const {
   securityMiddleware, 
   securityHeaders, 
   securityLogger, 
-  csrfProtection 
+  csrfProtection,
+  issueCsrfToken,
 } = require('./middleware/security');
 const { 
   generalRateLimiter, 

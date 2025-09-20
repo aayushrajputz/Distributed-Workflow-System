@@ -47,7 +47,10 @@ const validateEnvironment = () => {
   requireVar('MONGODB_URI');
   requireVar('JWT_SECRET');
   requireVar('NODE_ENV');
-  requireVar('REFRESH_TOKEN_SECRET');
+  // Support both REFRESH_TOKEN_SECRET and JWT_REFRESH_SECRET env names
+  if (!process.env.REFRESH_TOKEN_SECRET && !process.env.JWT_REFRESH_SECRET) {
+    throw new Error('Missing required environment variable: REFRESH_TOKEN_SECRET or JWT_REFRESH_SECRET');
+  }
   requireVar('PORT');
   requireVar('CLIENT_URL');
   
@@ -67,12 +70,13 @@ const validateEnvironment = () => {
     throw new Error(`NODE_ENV must be one of: ${validEnvs.join(', ')}`);
   }
 
-  // Validate REFRESH_TOKEN_SECRET
-  if (process.env.REFRESH_TOKEN_SECRET.length < 32) {
-    throw new Error('REFRESH_TOKEN_SECRET must be at least 32 characters long for security');
+  // Validate refresh secret length and difference
+  const refreshSecret = process.env.REFRESH_TOKEN_SECRET || process.env.JWT_REFRESH_SECRET;
+  if (refreshSecret.length < 32) {
+    throw new Error('Refresh token secret must be at least 32 characters long for security');
   }
-  if (process.env.REFRESH_TOKEN_SECRET === process.env.JWT_SECRET) {
-    throw new Error('REFRESH_TOKEN_SECRET must be different from JWT_SECRET for security');
+  if (refreshSecret === process.env.JWT_SECRET) {
+    throw new Error('Refresh token secret must be different from JWT_SECRET for security');
   }
 
   // Validate PORT as a number
