@@ -9,12 +9,16 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig.json ./
 
-# Install ALL dependencies (including dev) for building
+# Force-install ALL dependencies (including dev) for building, regardless of upstream env
+ENV NPM_CONFIG_PRODUCTION=false
+ENV NODE_ENV=development
 RUN npm ci
 
 # Copy source and build
 COPY src/ ./src/
-RUN npm run build
+# Ensure local node binaries (like tsc) are on PATH and verify TypeScript
+ENV PATH=/app/node_modules/.bin:$PATH
+RUN npx tsc --version && npm run build
 
 ########################################
 # Runtime stage: production-only deps
@@ -28,6 +32,7 @@ RUN apk add --no-cache curl
 
 # Copy package files and install only production deps
 COPY package*.json ./
+ENV NODE_ENV=production
 RUN npm ci --only=production
 
 # Copy compiled output from build stage
