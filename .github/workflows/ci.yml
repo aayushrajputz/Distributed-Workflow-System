@@ -44,6 +44,7 @@ jobs:
         cd backend
         npm test
       env:
+        CI: true
         NODE_ENV: test
         MONGODB_URI: mongodb://admin:password@localhost:27017/workflow-builder-test?authSource=admin
         JWT_SECRET: test-secret
