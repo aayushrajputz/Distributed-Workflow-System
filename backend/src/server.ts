@@ -33,15 +33,20 @@ import systemRoutes from './routes/system';
 dotenv.config();
 
 const app = express();
-const server = createServer(app);
-const io = new SocketIOServer(server, {
-  cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    methods: ["GET", "POST"],
-    credentials: true
-  },
-  transports: ['websocket', 'polling']
-});
+// Only create HTTP and Socket.IO servers when not running tests to avoid open handles in Jest
+let server: ReturnType<typeof createServer> | null = null;
+let io: SocketIOServer | null = null;
+if (process.env.NODE_ENV !== 'test') {
+  server = createServer(app);
+  io = new SocketIOServer(server, {
+    cors: {
+      origin: process.env.FRONTEND_URL || "http://localhost:3000",
+      methods: ["GET", "POST"],
+      credentials: true
+    },
+    transports: ['websocket', 'polling']
+  });
+}
 
 const PORT = process.env.PORT || 5000;
 
@@ -152,11 +157,13 @@ async function startServer() {
     }
 
     // Setup Socket.IO
-    socketService.setIO(io);
-    setupSocketIO(io);
+    if (io) {
+      socketService.setIO(io);
+      setupSocketIO(io);
+    }
 
-    // Start server
-    server.listen(PORT, () => {
+    // Start server (skip during tests when server is null)
+    server?.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`🔗 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
@@ -170,21 +177,23 @@ async function startServer() {
 }
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    console.log('✅ Process terminated');
-    process.exit(0);
+if (process.env.NODE_ENV !== 'test') {
+  process.on('SIGTERM', () => {
+    console.log('🛑 SIGTERM received, shutting down gracefully');
+    server?.close(() => {
+      console.log('✅ Process terminated');
+      process.exit(0);
+    });
   });
-});
 
-process.on('SIGINT', () => {
-  console.log('🛑 SIGINT received, shutting down gracefully');
-  server.close(() => {
-    console.log('✅ Process terminated');
-    process.exit(0);
+  process.on('SIGINT', () => {
+    console.log('🛑 SIGINT received, shutting down gracefully');
+    server?.close(() => {
+      console.log('✅ Process terminated');
+      process.exit(0);
+    });
   });
-});
+}
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
