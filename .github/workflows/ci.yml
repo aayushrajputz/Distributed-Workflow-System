@@ -128,7 +128,7 @@ jobs:
     - name: Build backend Docker image
       run: |
         cd backend
-        docker build -t workflow-backend:latest .
+        docker build --no-cache -t workflow-backend:latest .
     
     - name: Build frontend Docker image
       run: |
