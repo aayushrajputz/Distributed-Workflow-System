@@ -1,46 +1,52 @@
 ########################################
-# Build stage: install all deps & compile
+# Stage 1: Build (install dev deps + compile TS)
 ########################################
 FROM node:18-alpine AS build
 
 WORKDIR /app
 
-# Copy package files and tsconfig
+# Ensure consistent, clean installs
+ENV CI=true \
+    NODE_ENV=development \
+    NPM_CONFIG_LOGLEVEL=warn
+
+# Copy manifest files first to maximize layer caching
 COPY package*.json ./
 COPY tsconfig.json ./
 
-# Force-install ALL dependencies (including dev) for building, regardless of upstream env
-ENV NPM_CONFIG_PRODUCTION=false
-ENV NODE_ENV=development
+# Install ALL dependencies (including dev) for building
 RUN npm ci
 
 # Copy source and build
 COPY src/ ./src/
-# Ensure local node binaries (like tsc) are on PATH and verify TypeScript
+
+# Ensure local node binaries (like tsc) are on PATH and compile
 ENV PATH=/app/node_modules/.bin:$PATH
 RUN node -v && npm -v && tsc -v || ./node_modules/.bin/tsc -v
-# Compile TypeScript directly to avoid npm script/npx issues in some CI runners
-RUN ./node_modules/.bin/tsc -p tsconfig.json
+RUN npm run build
 
 ########################################
-# Runtime stage: production-only deps
+# Stage 2: Runtime (production only + compiled output)
 ########################################
 FROM node:18-alpine AS runtime
 
 WORKDIR /app
 
-# Install curl for HEALTHCHECK
+# Keep runtime small and secure
+ENV NODE_ENV=production \
+    NPM_CONFIG_LOGLEVEL=warn
+
+# Install curl for healthcheck
 RUN apk add --no-cache curl
 
-# Copy package files and install only production deps
+# Copy package files and install ONLY production dependencies
 COPY package*.json ./
-ENV NODE_ENV=production
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
-# Copy compiled output from build stage
+# Copy compiled dist from build stage
 COPY --from=build /app/dist ./dist
 
-# Create non-root user and necessary directories
+# Non-root user and basic directories
 RUN addgroup -g 1001 -S nodejs \
   && adduser -S nodejs -u 1001 \
   && mkdir -p /app/logs /app/uploads \
@@ -50,8 +56,9 @@ USER nodejs
 
 EXPOSE 5000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:5000/health || exit 1
+# Health check on the server
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fsS http://localhost:5000/health || exit 1
 
+# Start the compiled server
 CMD ["npm", "start"]
