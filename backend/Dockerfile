@@ -1,27 +1,43 @@
-FROM node:18-alpine
+########################################
+# Build stage: install all deps & compile
+########################################
+FROM node:18-alpine AS build
 
 WORKDIR /app
 
-# Copy package files
+# Copy package files and tsconfig
 COPY package*.json ./
 COPY tsconfig.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install ALL dependencies (including dev) for building
+RUN npm ci
 
-# Copy source code
+# Copy source and build
 COPY src/ ./src/
-
-# Build the application
 RUN npm run build
 
-# Create non-root user
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S nodejs -u 1001
+########################################
+# Runtime stage: production-only deps
+########################################
+FROM node:18-alpine AS runtime
 
-# Create directories for logs and uploads
-RUN mkdir -p /app/logs /app/uploads
-RUN chown -R nodejs:nodejs /app
+WORKDIR /app
+
+# Install curl for HEALTHCHECK
+RUN apk add --no-cache curl
+
+# Copy package files and install only production deps
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Copy compiled output from build stage
+COPY --from=build /app/dist ./dist
+
+# Create non-root user and necessary directories
+RUN addgroup -g 1001 -S nodejs \
+  && adduser -S nodejs -u 1001 \
+  && mkdir -p /app/logs /app/uploads \
+  && chown -R nodejs:nodejs /app
 
 USER nodejs
 
