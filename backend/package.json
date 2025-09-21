@@ -1,4 +1,5 @@
 {
+  "$schema": "https://json.schemastore.org/package",
   "name": "workflow-management-backend",
   "version": "1.0.0",
   "description": "Distributed workflow management system backend",
@@ -47,11 +48,15 @@
     "@types/multer": "^1.4.7",
     "@types/node": "^20.5.0",
     "@types/nodemailer": "^6.4.9",
+    "@types/supertest": "^2.0.12",
     "@typescript-eslint/eslint-plugin": "^6.4.0",
     "@typescript-eslint/parser": "^6.4.0",
     "eslint": "^8.47.0",
     "jest": "^29.6.2",
+    "mongodb-memory-server": "^8.15.1",
     "nodemon": "^3.0.1",
+    "supertest": "^6.3.3",
+    "ts-jest": "^29.1.1",
     "ts-node": "^10.9.1",
     "typescript": "^5.1.6"
   },
