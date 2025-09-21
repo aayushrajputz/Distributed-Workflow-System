@@ -18,7 +18,9 @@ RUN npm ci
 COPY src/ ./src/
 # Ensure local node binaries (like tsc) are on PATH and verify TypeScript
 ENV PATH=/app/node_modules/.bin:$PATH
-RUN npx tsc --version && npm run build
+RUN node -v && npm -v && tsc -v || ./node_modules/.bin/tsc -v
+# Compile TypeScript directly to avoid npm script/npx issues in some CI runners
+RUN ./node_modules/.bin/tsc -p tsconfig.json
 
 ########################################
 # Runtime stage: production-only deps
