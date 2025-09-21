@@ -127,8 +127,11 @@ jobs:
     
     - name: Build backend Docker image
       run: |
-        cd backend
-        docker build --no-cache -t workflow-backend:latest .
+        echo "----- backend/Dockerfile (CI) -----"
+        sed -n '1,200p' backend/Dockerfile
+        echo "-----------------------------------"
+        # Build using explicit Dockerfile path and explicit build context
+        docker build --no-cache --progress=plain -f backend/Dockerfile -t workflow-backend:latest backend
     
     - name: Build frontend Docker image
       run: |
