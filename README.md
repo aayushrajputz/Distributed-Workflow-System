@@ -1,7 +1,6 @@
 # 🚀 Workflow Management System with Integrated SaaS API Platform
 
-A comprehensive workflow management system enhanced with a complete SaaS API platform for exposing functionality through secure, managed APIs.
-This System capable of handling 225+ RPS with <3ms latency and near-zero errors, demonstrating strong system design, scalability, and performance optimization skills
+A comprehensive distributed workflow management system integrated with a SaaS API platform, enabling secure and managed API exposure. Achieved 225+ RPS with <3ms latency and near-zero errors, demonstrating advanced system design, scalability, and performance optimization.
 
 ## ✨ **Integrated Features**
 
