@@ -93,18 +93,20 @@ if (process.env.NODE_ENV !== 'test') {
 app.use(requestLogger);
 
 // General rate limiting
-const generalLimiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'), // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100'),
-  message: {
-    error: 'Too many requests from this IP, please try again later.',
-    retryAfter: '15 minutes'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+if (process.env.NODE_ENV !== 'loadtest') {
+  const generalLimiter = rateLimit({
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'), // 15 minutes
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100'),
+    message: {
+      error: 'Too many requests from this IP, please try again later.',
+      retryAfter: '15 minutes'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
-app.use('/api/', generalLimiter);
+  app.use('/api/', generalLimiter);
+}
 
 // API Key rate limiting for public endpoints
 app.use('/api/v1/', apiKeyRateLimit);
@@ -144,16 +146,18 @@ app.use(errorHandler);
 async function startServer() {
   try {
     // Connect to databases (optional for development)
-    try {
-      await connectDatabase();
-    } catch (error) {
-      console.warn('⚠️ MongoDB connection failed, continuing without database:', error instanceof Error ? error.message : String(error));
-    }
+    if (process.env.NODE_ENV !== 'loadtest') {
+      try {
+        await connectDatabase();
+      } catch (error) {
+        console.warn('⚠️ MongoDB connection failed, continuing without database:', error instanceof Error ? error.message : String(error));
+      }
 
-    try {
-      await connectRedis();
-    } catch (error) {
-      console.warn('⚠️ Redis connection failed, continuing without Redis:', error instanceof Error ? error.message : String(error));
+      try {
+        await connectRedis();
+      } catch (error) {
+        console.warn('⚠️ Redis connection failed, continuing without Redis:', error instanceof Error ? error.message : String(error));
+      }
     }
 
     // Setup Socket.IO
